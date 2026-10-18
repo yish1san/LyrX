@@ -1,0 +1,32 @@
+# Build and distribution
+.build/
+.swiftpm/
+releases/
+dist/
+*.app/
+*.dmg
+*.zip
+*.dSYM/
+*.xcworkspace/
+xcuserdata/
+
+# Local notes and credentials
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.key
+*.mobileprovision
+*.provisionprofile
+.workbuddy/
+.codex/
+.agents/
+work/
+qa/
+
+# macOS and temporary files
+.DS_Store
+._*
+*.log
+.Rhistory
