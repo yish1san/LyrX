@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 if [[ "${1:-}" == "--skip-build" ]]; then
     RELEASE_DIR="${2:-$(cat releases/latest-release.txt)}"
 else
-    RELEASE_DIR="releases/LyrX-1.0.0-$(date +%Y%m%d-%H%M%S)"
+    RELEASE_DIR="releases/LyrX-$(date +%Y%m%d-%H%M%S)"
     ./build-app.sh "$RELEASE_DIR"
 fi
 APP="$RELEASE_DIR/LyrX.app"

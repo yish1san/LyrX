@@ -96,8 +96,10 @@ private final class InteractiveHostingView<Content: View>: NSHostingView<Content
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var panel: OverlayPanel!
     private var statusItem: NSStatusItem!
+    private var visibilityMenuItem: NSMenuItem?
     private var settingsWindow: NSWindow?
     private var timingWindow: NSWindow?
+    private let globalShortcut = GlobalShortcut()
     private var wantsVisible = UserDefaults.standard.object(forKey: "overlay.isVisible") as? Bool ?? true
     private var screenObserver: NSObjectProtocol?
     private let preview = AppIdentity.isPreview
@@ -112,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let icon = AppIdentity.applicationIcon { NSApp.applicationIconImage = icon }
         let actions = OverlayActions(settings: { [weak self] in
                                          guard let self else { return }
                                          if store.appleMusicSyncEnabled { settings.selectedTab = .sources }
@@ -154,6 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         store.onPlaybackChange = { [weak self] in self?.updateVisibility() }
         setupMenu()
+        settings.onShortcutChange = { [weak self] in self?.updateGlobalShortcut() }
+        updateGlobalShortcut()
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.constrainToScreen() }
@@ -164,7 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         applyBehavior()
     }
 
-    func applicationWillTerminate(_ notification: Notification) { store.stop(); saveFrame() }
+    func applicationWillTerminate(_ notification: Notification) { globalShortcut.stop(); store.stop(); saveFrame() }
     func windowDidMove(_ notification: Notification) { if notification.object as? NSWindow === panel { saveFrame() } }
     func windowDidResize(_ notification: Notification) { if notification.object as? NSWindow === panel { saveFrame() } }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -199,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let autoHidden = settings.hideWhenPaused && !store.playing && store.connectionError == nil
         if wantsVisible && !autoHidden { panel.orderFrontRegardless() }
         else { panel.orderOut(nil) }
+        visibilityMenuItem?.title = panel.isVisible ? "隐藏悬浮窗" : "显示悬浮窗"
     }
     private func setVisible(_ value: Bool) {
         wantsVisible = value
@@ -235,18 +241,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let menu = NSMenu(); menu.delegate = self
         statusItem.menu = menu
         let main = NSMenu()
-        let root = NSMenuItem(); let appMenu = NSMenu()
+        let root = NSMenuItem(title: "LyrX", action: nil, keyEquivalent: ""); let appMenu = NSMenu(title: "LyrX")
         root.submenu = appMenu; main.addItem(root)
         appMenu.addItem(item("关于 LyrX", #selector(showAbout)))
         appMenu.addItem(.separator())
-        appMenu.addItem(item("显示 / 隐藏歌词", #selector(togglePanel), "l"))
+        let visibility = item("显示悬浮窗", #selector(togglePanel), "l")
+        visibilityMenuItem = visibility; appMenu.addItem(visibility)
         appMenu.addItem(item("设置…", #selector(openSettings), ","))
         appMenu.addItem(.separator())
         appMenu.addItem(item("退出 LyrX", #selector(quitApp), "q"))
+        // 标准编辑命令走响应链，确保设置输入框和文件选择器能复制、粘贴和撤销。
+        let edit = NSMenu(title: "编辑")
+        for (title, action, key, shifted) in [
+            ("撤销", "undo:", "z", false), ("重做", "redo:", "z", true),
+            ("剪切", "cut:", "x", false), ("复制", "copy:", "c", false),
+            ("粘贴", "paste:", "v", false), ("全选", "selectAll:", "a", false)
+        ] {
+            if title == "剪切" { edit.addItem(.separator()) }
+            let command = NSMenuItem(title: title, action: Selector(action), keyEquivalent: key)
+            command.keyEquivalentModifierMask = shifted ? [.command, .shift] : [.command]
+            edit.addItem(command)
+        }
+        let editRoot = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+        editRoot.submenu = edit; main.addItem(editRoot)
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(item("关闭窗口", #selector(closeCurrentWindow), "w"))
+        let windowRoot = NSMenuItem(title: "窗口", action: nil, keyEquivalent: "")
+        windowRoot.submenu = windowMenu; main.addItem(windowRoot)
         NSApp.mainMenu = main
     }
     private func item(_ title: String, _ action: Selector, _ key: String = "") -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; return item
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        item.keyEquivalentModifierMask = key.isEmpty ? [] : [.command]
+        return item
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -260,11 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(item("重置窗口位置", #selector(resetWindow)))
         let timing = item("歌词时间校准…", #selector(openTiming)); timing.isEnabled = store.canCalibrate; menu.addItem(timing)
         menu.addItem(.separator())
-        let refresh = item(store.appleMusicSyncEnabled ? "重新读取 Music 歌词" : "重新匹配歌词", #selector(refreshLyrics)); refresh.isEnabled = store.hasTrack && (store.appleMusicSyncEnabled || store.phase != .loading); menu.addItem(refresh)
-        let local = item("导入歌词…", #selector(importLyrics)); local.isEnabled = store.canImportLyrics; menu.addItem(local)
-        menu.addItem(.separator())
         menu.addItem(item("打开 Apple Music", #selector(openMusic)))
-        menu.addItem(item("词源与同步…", #selector(openMusicPermissions)))
         menu.addItem(item("设置…", #selector(openSettings), ","))
         menu.addItem(item("关于 LyrX", #selector(showAbout)))
         menu.addItem(item("退出 LyrX", #selector(quitApp), "q"))
@@ -275,17 +299,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 550),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "LyrX 设置"; window.titlebarSeparatorStyle = .none
-            window.contentView = NSHostingView(rootView: SettingsView().environmentObject(settings).environmentObject(store))
+            window.contentView = NSHostingView(rootView: SettingsView(importLyrics: { [weak self] in self?.importLyrics() })
+                .environmentObject(settings).environmentObject(store))
             window.delegate = self
             window.level = .floating; window.isReleasedWhenClosed = false; window.center()
             settingsWindow = window
         }
         settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    @objc private func openMusicPermissions() { settings.selectedTab = .sources; openSettings() }
     @objc private func showAbout() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0", .version: ""])
+        NSApp.orderFrontStandardAboutPanel(options: AppIdentity.aboutPanelOptions)
         NSApp.activate(ignoringOtherApps: true)
+    }
+    private func updateGlobalShortcut() {
+        globalShortcut.stop()
+        settings.globalShortcutError = nil
+        guard settings.globalShortcutEnabled else { return }
+        if !globalShortcut.start(action: { [weak self] in self?.togglePanel() }) {
+            settings.globalShortcutError = "⌃⌥L 当前不可用，可能已被其他应用占用。请关闭后重试。"
+        }
+    }
+    @objc private func closeCurrentWindow() {
+        guard let window = NSApp.keyWindow else { return }
+        if window === panel { setVisible(false) }
+        else { window.performClose(nil) }
     }
     @objc private func openTiming() {
         guard store.canCalibrate else { return }
@@ -326,7 +363,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func toggleMusicLyrics() { settings.followMusicLyrics.toggle() }
     @objc private func toggleCompact() { settings.compact.toggle() }
     @objc private func resetWindow() { resetPosition(); setVisible(true) }
-    @objc private func refreshLyrics() { store.refreshLyrics() }
     @objc private func openMusic() { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Music.app")) }
     @objc private func quitApp() { NSApp.terminate(nil) }
 }

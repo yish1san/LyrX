@@ -2,8 +2,8 @@
 # 构建 LyrX，每次创建独立发布文件夹，App 名称保持 LyrX.app。
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="1.0.0"
-BUILD_NUMBER="142"
+VERSION="1.0.1"
+BUILD_NUMBER="143"
 RELEASE_DIR="${1:-releases/LyrX-${VERSION}-$(date +%Y%m%d-%H%M%S)}"
 if [[ -e "$RELEASE_DIR" ]]; then
     echo "输出目录已存在，请使用新文件夹：$RELEASE_DIR" >&2

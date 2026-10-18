@@ -6,6 +6,30 @@ enum AppIdentity {
     static let legacyBundleID = "com.local.lyricsoverlay"
     static let migrationKey = "lyrx.didMigrateLegacyPreferences.v1"
 
+    @MainActor static var applicationIcon: NSImage? {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
+    @MainActor static var aboutPanelOptions: [NSApplication.AboutPanelOptionKey: Any] {
+        let info = Bundle.main.infoDictionary ?? [:]
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: info["CFBundleDisplayName"] as? String ?? "LyrX",
+            .applicationVersion: info["CFBundleShortVersionString"] as? String ?? "版本信息不可用",
+            .version: info["CFBundleVersion"] as? String ?? ""
+        ]
+        if let icon = applicationIcon { options[.applicationIcon] = icon }
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
+        let credits = NSMutableAttributedString(
+            string: "为 Apple Music 打造的桌面悬浮歌词工具。\n\nGitHub",
+            attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
+                         .paragraphStyle: paragraph])
+        credits.addAttribute(.link, value: URL(string: "https://github.com/yish1san/LyrX")!,
+                             range: (credits.string as NSString).range(of: "GitHub"))
+        options[.credits] = credits
+        return options
+    }
+
     static var isPreview: Bool {
         isPreview(arguments: CommandLine.arguments, bundleID: Bundle.main.bundleIdentifier)
     }

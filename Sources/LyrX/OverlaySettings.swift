@@ -34,9 +34,12 @@ final class OverlaySettings: ObservableObject {
     @Published var allSpaces: Bool { didSet { save(allSpaces, "allSpaces"); onBehaviorChange?() } }
     @Published var clickThrough: Bool { didSet { save(clickThrough, "clickThrough"); onBehaviorChange?() } }
     @Published var hideWhenPaused: Bool { didSet { save(hideWhenPaused, "hideWhenPaused"); onBehaviorChange?() } }
+    @Published var globalShortcutEnabled: Bool { didSet { save(globalShortcutEnabled, "globalShortcutEnabled"); onShortcutChange?() } }
+    @Published var globalShortcutError: String?
     var onLayoutChange: (() -> Void)?
     var onBehaviorChange: (() -> Void)?
     var onLyricsSourceChange: (() -> Void)?
+    var onShortcutChange: (() -> Void)?
     static let minLines = 3
     static let maxLines = 7
 
@@ -66,6 +69,7 @@ final class OverlaySettings: ObservableObject {
         allSpaces = flag("allSpaces", true)
         clickThrough = flag("clickThrough", false)
         hideWhenPaused = flag("hideWhenPaused", false)
+        globalShortcutEnabled = flag("globalShortcutEnabled", false)
     }
 
     var rowHeight: CGFloat { CGFloat(fontSize) * 1.55 + 8 }
@@ -81,6 +85,7 @@ final class OverlaySettings: ObservableObject {
 }
 
 struct SettingsView: View {
+    var importLyrics: () -> Void
     @EnvironmentObject var settings: OverlaySettings
     @EnvironmentObject var store: LyricsStore
     var body: some View {
@@ -132,10 +137,20 @@ struct SettingsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Section("快捷键") {
+                    Toggle("启用全局快捷键", isOn: $settings.globalShortcutEnabled)
+                    LabeledContent("显示／隐藏悬浮窗", value: "⌃⌥L")
+                    if let error = settings.globalShortcutError {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("开启后，在使用其他应用时也能显示或隐藏歌词。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .tabItem { Label("窗口", systemImage: "macwindow") }
             .tag(SettingsTab.behavior)
-            LyricsSourcesView()
+            LyricsSourcesView(importLyrics: importLyrics)
                 .tabItem { Label("词源", systemImage: "text.book.closed") }
                 .tag(SettingsTab.sources)
         }
@@ -146,6 +161,7 @@ struct SettingsView: View {
 }
 
 private struct LyricsSourcesView: View {
+    var importLyrics: () -> Void
     @EnvironmentObject var settings: OverlaySettings
     @EnvironmentObject var store: LyricsStore
 
@@ -176,6 +192,15 @@ private struct LyricsSourcesView: View {
                         Button("重新读取") { store.refreshLyrics() }
                             .disabled(!store.hasTrack || store.musicCacheChecking)
                         if store.musicCacheChecking { ProgressView().controlSize(.small) }
+                    }
+                }
+            } else {
+                Section("歌词操作") {
+                    HStack {
+                        Button("重新匹配歌词") { store.refreshLyrics() }
+                            .disabled(!store.hasTrack || store.phase == .loading)
+                        Button("导入歌词…", action: importLyrics)
+                            .disabled(!store.canImportLyrics)
                     }
                 }
             }
