@@ -18,7 +18,7 @@
 
 ## 下载与安装
 
-在本仓库的 **Releases** 页面下载 `LyrX-1.0.0-macOS-arm64.dmg`，或选择 ZIP 压缩包。
+在本仓库的 **Releases** 页面下载 `LyrX.dmg`
 
 1. 打开 DMG，将 **LyrX.app** 拖入“应用程序”。
 2. 打开 LyrX，在 Apple Music 播放歌曲。
