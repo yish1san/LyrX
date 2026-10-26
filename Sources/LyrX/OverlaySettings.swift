@@ -29,7 +29,7 @@ final class OverlaySettings: ObservableObject {
     @Published var centered: Bool { didSet { save(centered, "centered") } }
     @Published var compact: Bool { didSet { save(compact, "compact"); onLayoutChange?() } }
     @Published var karaoke: Bool { didSet { save(karaoke, "karaoke") } }
-    @Published var followMusicLyrics: Bool { didSet { onLyricsSourceChange?() } }
+    @Published var followMusicLyrics: Bool { didSet { save(followMusicLyrics, "followMusicLyrics"); onLyricsSourceChange?() } }
     @Published var floating: Bool { didSet { save(floating, "floating"); onBehaviorChange?() } }
     @Published var allSpaces: Bool { didSet { save(allSpaces, "allSpaces"); onBehaviorChange?() } }
     @Published var clickThrough: Bool { didSet { save(clickThrough, "clickThrough"); onBehaviorChange?() } }
@@ -63,8 +63,8 @@ final class OverlaySettings: ObservableObject {
         centered = flag("centered", true)
         compact = flag("compact", false)
         karaoke = flag("karaoke", true)
-        // Music 本地歌词按次启用，不沿用上一轮运行或旧版保存的开关。
-        followMusicLyrics = false
+        // 沿用上次选择；没有记录时仍默认使用自动匹配。临时预览不读取或写入偏好。
+        followMusicLyrics = flag("followMusicLyrics", false)
         floating = flag("floating", true)
         allSpaces = flag("allSpaces", true)
         clickThrough = flag("clickThrough", false)
@@ -170,7 +170,7 @@ private struct LyricsSourcesView: View {
             Section("歌词来源") {
                 LabeledContent("当前词源", value: store.currentSourceTitle)
                 Toggle("同步 Apple Music 歌词", isOn: $settings.followMusicLyrics)
-                    .help("每次启动默认关闭。读取 Music 本地歌词时间轴，无需辅助功能权限。")
+                    .help("下次启动沿用当前选择。读取 Music 本地歌词时间轴。")
                 if settings.followMusicLyrics {
                     Picker("高亮方式", selection: $settings.karaoke) {
                         Text("逐句").tag(false)

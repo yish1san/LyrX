@@ -234,18 +234,22 @@ final class StoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
         defaults.set(28, forKey: "overlay.fontSize")
+        defaults.set(true, forKey: "overlay.followMusicLyrics")
         let settings = OverlaySettings(defaults: defaults, temporary: true)
         XCTAssertEqual(settings.fontSize, 20)
+        XCTAssertFalse(settings.followMusicLyrics)
         settings.fontSize = 16
         XCTAssertEqual(defaults.double(forKey: "overlay.fontSize"), 28)
+        settings.followMusicLyrics = true
+        settings.followMusicLyrics = false
+        XCTAssertTrue(defaults.bool(forKey: "overlay.followMusicLyrics"))
         settings.compact = true
         XCTAssertEqual(settings.windowHeight, settings.rowHeight * 2 + 16)
     }
-    func testMusicSyncStartsOffEachSessionWithoutChangingOtherSavedSettings() {
+    func testMusicSourceChoicePersistsAcrossSessionsWithoutChangingAppearance() {
         let name = "LyrXTests.session.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
-        defaults.set(true, forKey: "overlay.followMusicLyrics")
         defaults.set(24, forKey: "overlay.fontSize")
         let settings = OverlaySettings(defaults: defaults)
         XCTAssertFalse(settings.followMusicLyrics)
@@ -254,10 +258,16 @@ final class StoreTests: XCTestCase {
         settings.onLyricsSourceChange = { changes += 1 }
         settings.followMusicLyrics = true
         XCTAssertTrue(settings.followMusicLyrics)
+        XCTAssertTrue(defaults.bool(forKey: "overlay.followMusicLyrics"))
         XCTAssertEqual(changes, 1)
-        let nextSession = OverlaySettings(defaults: defaults)
-        XCTAssertFalse(nextSession.followMusicLyrics)
+        let nextSession = OverlaySettings(defaults: UserDefaults(suiteName: name)!)
+        XCTAssertTrue(nextSession.followMusicLyrics)
         XCTAssertEqual(nextSession.fontSize, 24)
+        nextSession.followMusicLyrics = false
+        XCTAssertEqual(defaults.object(forKey: "overlay.followMusicLyrics") as? Bool, false)
+        let thirdSession = OverlaySettings(defaults: UserDefaults(suiteName: name)!)
+        XCTAssertFalse(thirdSession.followMusicLyrics)
+        XCTAssertEqual(thirdSession.fontSize, 24)
     }
     func testSwitchingMusicOffRestoresImportedLyricsAndOffsetWithoutDeletingThem() {
         let store = LyricsStore(cache: cache, preferences: preferences)

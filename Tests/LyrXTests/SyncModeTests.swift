@@ -82,7 +82,7 @@ final class MusicModeRecoveryTests: XCTestCase {
         let plan = LyricHighlightPlan(line: lineResult.lines[0], end: 5)
         XCTAssertEqual(plan.glyphs.map { $0.progress(at: 3) }, [1, 1, 0, 0])
     }
-    func testModeCanBeChosenBeforeDataAndPersistsWithoutEnablingSyncOnLaunch() {
+    func testHighlightModeAndMusicSourceBothPersistAcrossLaunches() {
         let name = "LyrXTests.mode.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -94,6 +94,6 @@ final class MusicModeRecoveryTests: XCTestCase {
         XCTAssertTrue(store.musicHighlightDescription(progress: settings.karaoke).contains("已选择逐字"))
         let next = OverlaySettings(defaults: defaults)
         XCTAssertTrue(next.karaoke)
-        XCTAssertFalse(next.followMusicLyrics)
+        XCTAssertTrue(next.followMusicLyrics)
     }
 }
