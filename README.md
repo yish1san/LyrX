@@ -23,13 +23,10 @@
 </p>
 
 <details>
-<summary>精简模式与外观设置</summary>
+<summary>精简模式</summary>
 
 <p align="center">
   <img src="docs/screenshots/compact.png" width="560" alt="LyrX 精简模式，只显示歌词">
-</p>
-<p align="center">
-  <img src="docs/screenshots/appearance.png" width="560" alt="LyrX 字体、颜色与高亮设置">
 </p>
 
 </details>
