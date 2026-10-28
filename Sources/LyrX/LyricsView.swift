@@ -69,8 +69,10 @@ private struct LyricRow: View {
     let end: Double
     let clock: PlaybackClock
     let playing: Bool
-    let fontSize: Double
+    let font: NSFont
+    let baseColor: Color
     let accent: Color
+    let highlightStyle: LyricHighlightStyle
     let karaoke: Bool
     let centered: Bool
     let compact: Bool
@@ -79,12 +81,13 @@ private struct LyricRow: View {
         Group {
             if current && karaoke {
                 ProgressLyricText(plan: LyricHighlightPlan(line: line, end: end),
-                                  clock: clock, playing: playing, accent: accent)
+                                  clock: clock, playing: playing, font: font, baseColor: baseColor,
+                                  accent: accent, style: highlightStyle, centered: centered, compact: compact)
             } else {
-                Text(line.text).foregroundStyle(current ? accent : .primary.opacity(transparent ? (past ? 0.7 : 0.6) : (past ? 0.48 : 0.34)))
+                Text(line.text).foregroundStyle(current ? accent : baseColor.opacity(transparent ? (past ? 0.7 : 0.6) : (past ? 0.48 : 0.34)))
             }
         }
-        .font(.system(size: fontSize, weight: current ? .semibold : .medium, design: .rounded))
+        .font(Font(font))
         .multilineTextAlignment(centered ? .center : .leading)
         .lineLimit(compact ? 1 : 3)
         .minimumScaleFactor(compact ? 0.65 : 1)
@@ -100,7 +103,12 @@ private struct ProgressLyricText: View {
     let plan: LyricHighlightPlan
     @ObservedObject var clock: PlaybackClock
     let playing: Bool
+    let font: NSFont
+    let baseColor: Color
     let accent: Color
+    let style: LyricHighlightStyle
+    let centered: Bool
+    let compact: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -114,14 +122,10 @@ private struct ProgressLyricText: View {
         .transaction { $0.animation = nil }
     }
 
-    private func text(at date: Date) -> Text {
-        let position = clock.lyricPosition(at: date)
-        let text = plan.glyphs.reduce(into: AttributedString()) { result, glyph in
-            var fragment = AttributedString(glyph.text)
-            fragment.foregroundColor = accent.opacity(0.28 + glyph.progress(at: position) * 0.72)
-            result += fragment
-        }
-        return Text(text)
+    private func text(at date: Date) -> some View {
+        LyricSweepText(plan: plan, position: clock.lyricPosition(), font: font,
+                       baseColor: baseColor, highlightColor: accent, style: style,
+                       centered: centered, compact: compact)
     }
 }
 
@@ -217,7 +221,7 @@ struct LyricsView: View {
             else { scrollingLyrics.id(store.lyricsVersion) }
         } else if let plain = store.plainLyrics {
             ScrollView {
-                Text(plain).font(.system(size: settings.fontSize, weight: .medium, design: .rounded))
+                Text(plain).font(Font(settings.nativeFont())).foregroundStyle(settings.lyricColor)
                     .multilineTextAlignment(settings.centered ? .center : .leading)
                     .frame(maxWidth: .infinity, alignment: settings.centered ? .center : .leading)
                     .textSelection(.enabled).padding(20)
@@ -273,7 +277,7 @@ struct LyricsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.synced && !store.lines.isEmpty { compactLyrics }
         else if let plain = store.plainLyrics {
-            Text(plain).font(.system(size: settings.fontSize, weight: .medium, design: .rounded))
+            Text(plain).font(Font(settings.nativeFont())).foregroundStyle(settings.lyricColor)
                 .multilineTextAlignment(settings.centered ? .center : .leading).lineLimit(2)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: settings.centered ? .center : .leading)
                 .padding(.horizontal, 24)
@@ -303,9 +307,11 @@ struct LyricsView: View {
     private func row(_ line: LyricLine, at index: Int) -> some View {
         LyricRow(line: line, current: index == store.currentIndex, past: index < store.currentIndex,
                  end: LyricHighlightPlan.end(of: line, nextTime: index + 1 < store.lines.count ? store.lines[index + 1].time : nil,
-                                            duration: store.duration),
+                                            duration: store.duration, context: store.lines),
                  clock: store.clock, playing: store.playing && store.connectionError == nil,
-                 fontSize: settings.fontSize, accent: settings.accent.color, karaoke: settings.karaoke && store.supportsProgressHighlight, centered: settings.centered,
+                 font: settings.nativeFont(emphasized: index == store.currentIndex), baseColor: settings.lyricColor,
+                 accent: settings.highlightColor, highlightStyle: settings.highlightStyle,
+                 karaoke: settings.karaoke && store.supportsProgressHighlight, centered: settings.centered,
                  compact: settings.compact, transparent: settings.isTransparent)
     }
 

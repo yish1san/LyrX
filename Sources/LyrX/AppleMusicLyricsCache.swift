@@ -24,7 +24,18 @@ struct AppleMusicLyricsCache: Sendable {
         guard code == SQLITE_OK, let database else {
             return .unavailable(message: "无法读取 Music 本地歌词，可选择缓存文件夹授权。", needsAccess: true)
         }
-        sqlite3_busy_timeout(database, 150)
+        sqlite3_busy_timeout(database, 25)
+        // Music 正在使用的数据库只做短时读取；查询过慢就退出，稍后重试。
+        let deadline = UnsafeMutablePointer<TimeInterval>.allocate(capacity: 1)
+        deadline.initialize(to: ProcessInfo.processInfo.systemUptime + 0.25)
+        sqlite3_progress_handler(database, 1000, { context in
+            guard let context else { return 1 }
+            return ProcessInfo.processInfo.systemUptime >= context.assumingMemoryBound(to: TimeInterval.self).pointee ? 1 : 0
+        }, deadline)
+        defer {
+            sqlite3_progress_handler(database, 0, nil, nil)
+            deadline.deinitialize(count: 1); deadline.deallocate()
+        }
         let sql = """
         SELECT d.isDataOnFS, d.receiver_data
         FROM cfurl_cache_response AS r JOIN cfurl_cache_receiver_data AS d USING(entry_ID)
@@ -33,18 +44,32 @@ struct AppleMusicLyricsCache: Sendable {
         """
         var statement: OpaquePointer?
         defer { if let statement { sqlite3_finalize(statement) } }
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+        let prepared = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
+        guard prepared == SQLITE_OK, let cursor = statement else {
+            if [SQLITE_BUSY, SQLITE_LOCKED].contains(prepared) {
+                return .unavailable(message: "Music 歌词缓存正忙，稍后重试。", needsAccess: false)
+            }
             return .unavailable(message: "当前 Music 缓存格式暂不兼容，可关闭 Music 同步使用自动匹配。", needsAccess: false)
         }
+        var payloads: [(onFile: Bool, data: Data)] = []
         var totalBytes = 0
+        while ProcessInfo.processInfo.systemUptime < deadline.pointee, sqlite3_step(cursor) == SQLITE_ROW {
+            let length = Int(sqlite3_column_bytes(cursor, 1))
+            guard length > 0, length <= maximumBytes, let bytes = sqlite3_column_blob(cursor, 1) else { continue }
+            totalBytes += length
+            if totalBytes > 24 * 1024 * 1024 { break }
+            payloads.append((sqlite3_column_int(cursor, 0) == 1, Data(bytes: bytes, count: length)))
+        }
+        let readStatus = sqlite3_errcode(database)
+        // 先释放查询游标，再读缓存文件和解析歌词，避免解析期间占住数据库读事务。
+        sqlite3_finalize(cursor); statement = nil
         var lineOnly: LyricsResult?
-        let deadline = Date().addingTimeInterval(1.5)
-        while Date() < deadline, sqlite3_step(statement) == SQLITE_ROW {
-            let length = Int(sqlite3_column_bytes(statement, 1))
-            guard length > 0, length <= maximumBytes, let bytes = sqlite3_column_blob(statement, 1) else { continue }
-            let payload = Data(bytes: bytes, count: length)
+        totalBytes = 0
+        let decodeDeadline = ProcessInfo.processInfo.systemUptime + 1
+        for entry in payloads where ProcessInfo.processInfo.systemUptime < decodeDeadline {
+            let payload = entry.data
             let data: Data
-            if sqlite3_column_int(statement, 0) == 1 {
+            if entry.onFile {
                 guard let name = String(data: payload, encoding: .utf8), UUID(uuidString: name) != nil else { continue }
                 let allowed = directory.appendingPathComponent("fsCachedData", isDirectory: true).resolvingSymlinksInPath()
                 let file = allowed.appendingPathComponent(name).resolvingSymlinksInPath()
@@ -61,6 +86,9 @@ struct AppleMusicLyricsCache: Sendable {
             }
         }
         if let lineOnly { return .lyrics(lineOnly) }
+        if [SQLITE_BUSY, SQLITE_LOCKED, SQLITE_INTERRUPT].contains(readStatus) {
+            return .unavailable(message: "Music 歌词缓存正忙，稍后重试。", needsAccess: false)
+        }
         return .unavailable(message: "尚无这首歌的逐词缓存，请在 Music 展开歌词后重试。", needsAccess: false)
     }
 

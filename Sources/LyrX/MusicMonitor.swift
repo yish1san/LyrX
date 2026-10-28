@@ -32,7 +32,9 @@ struct MusicState {
     var album = ""
     var duration: Double = 0  // 秒
     var position: Double = 0  // 秒
-    var polledAt = Date()     // 本次轮询时间，用于本地插值
+    var polledAt = Date()     // 兼容没有单调时间的快照
+    var sampledAtUptime: TimeInterval? = nil // 进度实际读取时刻，不包含传输和界面排队耗时
+    var resetPlaybackClock = false
     var embeddedLyrics: String?
     var artworkData: Data? // 小尺寸 PNG；无封面时为 nil
     var next: NextTrack?      // 当前播放列表的下一首（用于后台预取歌词）
@@ -41,133 +43,265 @@ struct MusicState {
     var scriptError: String? = nil
 }
 
-/// 通过 AppleScript 轮询 Apple Music 播放状态
+/// 轻量读取进度；歌曲元数据与下一首仅在切歌时读取，封面另队列按需读取。
 final class MusicMonitor {
-    private let queue = DispatchQueue(label: "lyrics.music.monitor")
-    private var timer: DispatchSourceTimer?
-    private var script: NSAppleScript?
-    private var lastLoggedError: String?
-    private var artworkScript: NSAppleScript?
-    private var artworkTrackID = ""
-    private var artworkData: Data?
-    private var embeddedLyrics: String?
-    private var artworkAttempts = 0
-    private var nextArtworkAttempt = Date.distantPast
-    private let onUpdate: (MusicState) -> Void
-
-    init(interval: TimeInterval = 0.3, onUpdate: @escaping (MusicState) -> Void) {
-        self.onUpdate = onUpdate
-        let source = #"""
-        if application "Music" is not running then return "NOT_RUNNING"
+    static let pollInterval: TimeInterval = 0.8
+    static let stateScriptSource = #"""
+    use framework "Foundation"
+    if application "Music" is not running then return "NOT_RUNNING"
+    with timeout of 2 seconds
         tell application "Music"
-            if player state is stopped then return "STOPPED"
-            set t to current track
-            set dur to 0
+            set playbackState to player state as string
+            if playbackState is "stopped" then return "STOPPED"
+            set trackToken to ""
             try
-                set dur to duration of t
+                set trackToken to persistent ID of current track as text
             end try
-            set nm to ""
-            set ar to ""
-            set al to ""
-            try
-                set nm to (name of t) as text
-                set ar to (artist of t) as text
-                set al to (album of t) as text
-            end try
-            -- 顺带取当前播放列表的下一首（同一轮询，无额外进程开销）；
-            -- 非播放列表上下文（如随机播放资料库）会抛错，兜底为空。
-            -- 注意：变量名不可用 nd（AppleScript 保留字，编译报 -2741）
-            set nextNm to ""
-            set nextAr to ""
-            set nextAl to ""
-            set nextDur to 0
-            try
-                set nt to track ((index of t) + 1) of current playlist
-                set nextNm to (name of nt) as text
-                set nextAr to (artist of nt) as text
-                set nextAl to (album of nt) as text
-                set nextDur to duration of nt
-            end try
-            return {nm, ar, al, dur, player position, (player state as string), nextNm, nextAr, nextAl, nextDur}
+            if trackToken is "" then
+                set t to current track
+                set trackToken to (name of t as text) & "|" & (artist of t as text) & "|" & (album of t as text)
+            end if
         end tell
-        """#
-        queue.async { [weak self] in
-            self?.script = NSAppleScript(source: source)
-            self?.artworkScript = NSAppleScript(source: MusicArtwork.scriptSource)
-            let timer = DispatchSource.makeTimerSource(queue: self?.queue)
-            timer.schedule(deadline: .now(), repeating: interval)
-            timer.setEventHandler { [weak self] in self?.poll() }
-            timer.resume()
-            self?.timer = timer
+        set sampleStart to (current application's NSProcessInfo's processInfo()'s systemUptime()) as real
+        tell application "Music" to set playbackPosition to player position
+        set sampleEnd to (current application's NSProcessInfo's processInfo()'s systemUptime()) as real
+        return {trackToken, playbackPosition, playbackState, sampleStart, sampleEnd}
+    end timeout
+    """#
+
+    static func metadataScriptSource(includeNext: Bool) -> String {
+        """
+        if application "Music" is not running then return {}
+        with timeout of 2 seconds
+            tell application "Music"
+                set t to current track
+                set nm to name of t as text
+                set ar to artist of t as text
+                set al to album of t as text
+                set dur to duration of t
+                set trackToken to ""
+                try
+                    set trackToken to persistent ID of t as text
+                end try
+                if trackToken is "" then set trackToken to nm & "|" & ar & "|" & al
+                set nextNm to ""
+                set nextAr to ""
+                set nextAl to ""
+                set nextDur to 0
+                if \(includeNext ? "true" : "false") then
+                    try
+                        set nt to track ((index of t) + 1) of current playlist
+                        set nextNm to name of nt as text
+                        set nextAr to artist of nt as text
+                        set nextAl to album of nt as text
+                        set nextDur to duration of nt
+                    end try
+                end if
+                return {nm, ar, al, dur, nextNm, nextAr, nextAl, nextDur, trackToken}
+            end tell
+        end timeout
+        """
+    }
+
+    // NSAppleScript 的后台工作统一串行执行（Apple DTS: forums/thread/759287）。
+    private static let scriptingQueue = DispatchQueue(label: "lyrx.apple-events", qos: .userInitiated)
+    private static var scriptCache: [String: NSAppleScript] = [:]
+    private static let runtimePrepared: Void = {
+        let warmUp: () -> Void = {
+            let source = #"""
+            use framework "Foundation"
+            return (current application's NSProcessInfo's processInfo()'s systemUptime()) as real
+            """#
+            var error: NSDictionary?
+            NSAppleScript(source: source)?.executeAndReturnError(&error)
+        }
+        // 先在主线程完成系统脚本引擎的初始化；不访问 Music。
+        if Thread.isMainThread { warmUp() } else { DispatchQueue.main.sync(execute: warmUp) }
+    }()
+
+    static func prepareScriptingRuntime() { _ = runtimePrepared }
+
+    static func runScript(_ source: String, cache: Bool = true) -> (NSAppleEventDescriptor?, NSDictionary?) {
+        prepareScriptingRuntime()
+        return scriptingQueue.sync {
+            var error: NSDictionary?
+            guard let script = (cache ? scriptCache[source] : nil) ?? NSAppleScript(source: source) else {
+                return (nil, [NSAppleScript.errorNumber: -2741] as NSDictionary)
+            }
+            if cache && scriptCache.count < 8 { scriptCache[source] = script }
+            return (script.executeAndReturnError(&error), error)
         }
     }
 
-    deinit { timer?.cancel() }
+    private let queue = DispatchQueue(label: "lyrx.music.progress", qos: .userInitiated)
+    private let extrasQueue = DispatchQueue(label: "lyrx.music.extras", qos: .utility)
+    private var timer: DispatchSourceTimer?
+    private var observers: [NSObjectProtocol] = []
+    private var eventPoll: DispatchWorkItem?
+    private var lastPoll = -Double.infinity
+    private var nextAllowedPoll: TimeInterval = 0
+    private var failures = 0
+    private var automaticLyrics: Bool
+    private var metadataToken = ""
+    private var cachedState = MusicState()
+    private var embeddedRequestedFor = ""
+    private var hasSnapshot = false
+    private let onUpdate: (MusicState) -> Void
 
-    private func poll() {
-        var state = MusicState()
-        var error: NSDictionary?
-        guard let result = script?.executeAndReturnError(&error), error == nil else {
-            // 脚本编译/执行失败（语法错误、权限被拒 -1743 等）：
-            // 不能臆断为「未运行」——用 NSWorkspace 独立判断进程状态，
-            // 并附带诊断信息让 UI 显示真实原因，同时写日志便于定位
-            let msg = error?[NSAppleScript.errorMessage] as? String ?? "未知脚本错误"
-            let num = error?[NSAppleScript.errorNumber] as? Int ?? 0
-            if lastLoggedError != msg {
-                NSLog("[LyrX] AppleScript 轮询失败 (%d): %@", num, msg)
-                lastLoggedError = msg
+    init(interval: TimeInterval = MusicMonitor.pollInterval, automaticLyrics: Bool = true,
+         onUpdate: @escaping (MusicState) -> Void) {
+        self.onUpdate = onUpdate
+        self.automaticLyrics = automaticLyrics
+        Self.prepareScriptingRuntime()
+        // 通知只负责提前唤醒轻量读取；不依赖通知载荷，不记录歌曲信息。
+        for name in ["com.apple.Music.playerInfo", "com.apple.iTunes.playerInfo"] {
+            let observer = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name(name), object: nil, queue: nil) { [weak self] _ in self?.requestPoll() }
+            observers.append(observer)
+        }
+        queue.async { [weak self] in
+            guard let self else { return }
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: max(0.5, interval), leeway: .milliseconds(15))
+            timer.setEventHandler { [weak self] in self?.poll() }
+            timer.resume(); self.timer = timer
+        }
+    }
+
+    deinit {
+        timer?.cancel(); eventPoll?.cancel()
+        for observer in observers { DistributedNotificationCenter.default().removeObserver(observer) }
+    }
+
+    func setAutomaticLyricsEnabled(_ enabled: Bool) {
+        queue.async { [weak self] in
+            guard let self, automaticLyrics != enabled else { return }
+            automaticLyrics = enabled
+            metadataToken = "" // 下次读取时重新生成符合当前模式的元数据。
+        }
+    }
+
+    private func requestPoll() {
+        queue.async { [weak self] in
+            guard let self, eventPoll == nil else { return }
+            let delay = max(0, lastPoll + 0.15 - ProcessInfo.processInfo.systemUptime)
+            let work = DispatchWorkItem { [weak self] in
+                self?.eventPoll = nil; self?.poll()
             }
-            state.scriptError = "\(msg) (\(num))"
-            state.running = NSWorkspace.shared.runningApplications.contains {
-                $0.bundleIdentifier == "com.apple.Music"
-            }
+            eventPoll = work
+            queue.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    }
+
+    private func poll(force: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force || (now >= nextAllowedPoll && now - lastPoll >= 0.1) else { return }
+        lastPoll = now
+        let (readResult, error) = Self.runScript(Self.stateScriptSource)
+        guard let result = readResult, error == nil else {
+            failures += 1
+            nextAllowedPoll = ProcessInfo.processInfo.systemUptime + min(8, pow(2, Double(min(failures, 3))))
+            var state = cachedState
+            let number = error?[NSAppleScript.errorNumber] as? Int ?? 0
+            state.scriptError = "无法读取 Music 播放进度 (\(number))"
             onUpdate(state)
             return
         }
-        lastLoggedError = nil
-        state.polledAt = Date()
-        if let s = result.stringValue {
-            if s == "NOT_RUNNING" { onUpdate(state); return }
-            if s == "STOPPED" { state.running = true; onUpdate(state); return }
+        failures = 0; nextAllowedPoll = 0
+        if let value = result.stringValue, ["NOT_RUNNING", "STOPPED"].contains(value) {
+            cachedState = MusicState(); cachedState.running = value == "STOPPED"
+            metadataToken = ""; embeddedRequestedFor = ""; hasSnapshot = false
+            onUpdate(cachedState); return
         }
-        func text(at i: Int) -> String {
-            guard let d = result.atIndex(i), d.descriptorType != typeNull else { return "" }
-            return d.stringValue ?? ""
+        let token = Self.text(result, 1)
+        guard !token.isEmpty else { return }
+        var state = cachedState
+        if metadataToken != token {
+            let (metadataResult, metadataError) = Self.runScript(Self.metadataScriptSource(includeNext: automaticLyrics))
+            guard let metadata = metadataResult, metadataError == nil,
+                  Self.text(metadata, 9) == token else {
+                if let metadataError {
+                    failures += 1
+                    nextAllowedPoll = ProcessInfo.processInfo.systemUptime + min(8, pow(2, Double(min(failures, 3))))
+                    var failed = cachedState
+                    failed.scriptError = "无法读取 Music 歌曲信息 (\(metadataError[NSAppleScript.errorNumber] as? Int ?? 0))"
+                    onUpdate(failed)
+                }
+                return
+            }
+            state = MusicState()
+            state.title = Self.text(metadata, 1); state.artist = Self.text(metadata, 2); state.album = Self.text(metadata, 3)
+            state.duration = metadata.atIndex(4)?.doubleValue ?? 0
+            state.trackID = state.title.isEmpty ? "" : "\(state.title)|\(state.artist)|\(state.album)"
+            if !Self.text(metadata, 5).isEmpty {
+                state.next = NextTrack(title: Self.text(metadata, 5), artist: Self.text(metadata, 6), album: Self.text(metadata, 7),
+                                       duration: metadata.atIndex(8)?.doubleValue ?? 0)
+            }
+            metadataToken = token; embeddedRequestedFor = ""
+            scheduleArtwork(for: state.trackID, token: token)
         }
-        state.running = true
-        state.title = text(at: 1)
-        state.artist = text(at: 2)
-        state.album = text(at: 3)
-        state.duration = result.atIndex(4)?.doubleValue ?? 0
-        state.position = result.atIndex(5)?.doubleValue ?? 0
-        state.playing = (text(at: 6) == "playing")
-        state.trackID = state.title.isEmpty ? "" : "\(state.title)|\(state.artist)|\(state.album)"
-        let nextTitle = text(at: 7)
-        if !nextTitle.isEmpty {
-            state.next = NextTrack(title: nextTitle, artist: text(at: 8), album: text(at: 9),
-                                   duration: result.atIndex(10)?.doubleValue ?? 0)
-        }
-        if artworkTrackID != state.trackID {
-            artworkTrackID = state.trackID
-            artworkData = nil; embeddedLyrics = nil; artworkAttempts = 0; nextArtworkAttempt = .distantPast
-        }
-        state.artworkData = artworkData
-        state.embeddedLyrics = embeddedLyrics
-        // 先发布播放状态，再读取封面；封面失败不会影响歌词同步。
+        state.running = true; state.playing = Self.text(result, 3) == "playing"
+        state.position = result.atIndex(2)?.doubleValue ?? 0
+        let start = result.atIndex(4)?.doubleValue ?? .nan
+        let end = result.atIndex(5)?.doubleValue ?? .nan
+        let received = ProcessInfo.processInfo.systemUptime
+        state.sampledAtUptime = Self.sampleTime(start: start, end: end, received: received)
+        state.polledAt = Date().addingTimeInterval((state.sampledAtUptime ?? received) - received)
+        state.scriptError = nil
+        state.resetPlaybackClock = force
+        cachedState = state; hasSnapshot = true
         onUpdate(state)
-        if !state.trackID.isEmpty, artworkData == nil, artworkAttempts < 3, Date() >= nextArtworkAttempt {
-            artworkAttempts += 1
-            nextArtworkAttempt = Date().addingTimeInterval(4)
-            var artworkError: NSDictionary?
-            if let result = artworkScript?.executeAndReturnError(&artworkError), artworkError == nil {
-                let actualID = (1...3).map { result.atIndex($0)?.stringValue ?? "" }.joined(separator: "|")
-                // 读取期间可能切歌，只有元数据与快照相符时才接收封面。
-                if actualID == state.trackID {
-                    if let raw = result.atIndex(4), raw.descriptorType != typeNull {
-                        artworkData = MusicArtwork.thumbnailData(from: raw.data)
-                    }
-                    let text = result.atIndex(5)?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    embeddedLyrics = text.isEmpty ? nil : text
+    }
+
+    static func sampleTime(start: TimeInterval, end: TimeInterval, received: TimeInterval) -> TimeInterval? {
+        guard start.isFinite, end.isFinite, received.isFinite, start >= 0, end >= start,
+              end <= received + 0.01, received - start <= 5 else { return nil }
+        // 响应很慢时，耗时可能来自 Music 排队；不把整段等待算作对称传输延迟。
+        return end - start <= 0.15 ? start + (end - start) / 2 : end
+    }
+
+    private static func text(_ result: NSAppleEventDescriptor, _ index: Int) -> String {
+        guard let value = result.atIndex(index), value.descriptorType != typeNull else { return "" }
+        return value.stringValue ?? ""
+    }
+
+    private func scheduleArtwork(for trackID: String, token: String) {
+        // 给切歌后的歌词界面留出时间；不反复重试缺失的封面。
+        queue.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, metadataToken == token else { return }
+            extrasQueue.async { [weak self] in
+                guard let self, queue.sync(execute: { self.metadataToken == token && self.cachedState.trackID == trackID }) else { return }
+                let (result, error) = Self.runScript(MusicArtwork.scriptSource)
+                guard error == nil, let result,
+                      (1...3).map({ Self.text(result, $0) }).joined(separator: "|") == trackID else { return }
+                let data = result.atIndex(4).flatMap { $0.descriptorType == typeNull ? nil : MusicArtwork.thumbnailData(from: $0.data) }
+                queue.async { [weak self] in
+                    guard let self, metadataToken == token, cachedState.trackID == trackID, hasSnapshot else { return }
+                    cachedState.artworkData = data
+                    var update = cachedState; update.resetPlaybackClock = false
+                    onUpdate(update)
+                }
+            }
+        }
+    }
+
+    /// 仅在自动匹配未找到歌词时，按曲目请求一次内嵌歌词；Music 词源不需要此项。
+    func requestEmbeddedLyrics(for trackID: String) {
+        queue.async { [weak self] in
+            guard let self, automaticLyrics, cachedState.trackID == trackID,
+                  embeddedRequestedFor != trackID else { return }
+            embeddedRequestedFor = trackID
+            extrasQueue.async { [weak self] in
+                guard let self, queue.sync(execute: { self.automaticLyrics && self.cachedState.trackID == trackID }) else { return }
+                let (result, error) = Self.runScript(MusicArtwork.embeddedLyricsScriptSource)
+                guard error == nil, let result,
+                      (1...3).map({ Self.text(result, $0) }).joined(separator: "|") == trackID else { return }
+                let lyricText = Self.text(result, 4).trimmingCharacters(in: .whitespacesAndNewlines)
+                queue.async { [weak self] in
+                    guard let self, automaticLyrics, cachedState.trackID == trackID, hasSnapshot else { return }
+                    cachedState.embeddedLyrics = lyricText.isEmpty ? nil : lyricText
+                    var update = cachedState; update.resetPlaybackClock = false
+                    onUpdate(update)
                 }
             }
         }
@@ -175,7 +309,6 @@ final class MusicMonitor {
 
     func perform(_ command: MusicCommand, completion: @escaping (String?) -> Void) {
         queue.async { [weak self] in
-            // 控制按钮不隐式启动 Music；所有命令与轮询在同一队列执行。
             let source = """
             if application "Music" is running then
                 tell application "Music"
@@ -183,10 +316,9 @@ final class MusicMonitor {
                 end tell
             end if
             """
-            var error: NSDictionary?
-            NSAppleScript(source: source)?.executeAndReturnError(&error)
+            let (_, error) = Self.runScript(source, cache: false)
             completion(error.map { "操作失败：\($0[NSAppleScript.errorMessage] as? String ?? "请检查自动化权限")" })
-            self?.poll()
+            self?.poll(force: true)
         }
     }
 }

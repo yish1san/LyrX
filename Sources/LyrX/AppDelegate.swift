@@ -114,7 +114,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let icon = AppIdentity.applicationIcon { NSApp.applicationIconImage = icon }
+        if !AppIdentity.hasAdaptiveIcon, let icon = AppIdentity.applicationIcon {
+            NSApp.applicationIconImage = icon
+        }
         let actions = OverlayActions(settings: { [weak self] in
                                          guard let self else { return }
                                          if store.appleMusicSyncEnabled { settings.selectedTab = .sources }
@@ -164,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             Task { @MainActor in self?.constrainToScreen() }
         }
         if preview { wantsVisible = true }
-        store.start(preview: preview)
+        store.start(preview: preview, appleMusicSync: settings.followMusicLyrics)
         store.setAppleMusicSyncEnabled(settings.followMusicLyrics)
         applyBehavior()
     }
@@ -296,7 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     @objc private func openSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 550),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "LyrX 设置"; window.titlebarSeparatorStyle = .none
             window.contentView = NSHostingView(rootView: SettingsView(importLyrics: { [weak self] in self?.importLyrics() })
@@ -310,6 +312,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: AppIdentity.aboutPanelOptions)
         NSApp.activate(ignoringOtherApps: true)
+    }
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window === settingsWindow {
+            LyricFontPanel.shared.close(for: settings)
+        }
     }
     private func updateGlobalShortcut() {
         globalShortcut.stop()

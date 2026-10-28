@@ -95,6 +95,22 @@ final class AppleMusicCacheTests: XCTestCase {
             XCTAssertTrue(needsAccess)
         } else { XCTFail("Missing cache must report access state") }
     }
+    func testBusyMusicCacheReturnsPromptlyWithoutAskingForAccessOrChangingIt() throws {
+        let directory = try fixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try database(directory, rows: [(0, try response(ttml: xml))])
+        var writer: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("Cache.db").path, &writer), SQLITE_OK)
+        defer { sqlite3_exec(writer, "ROLLBACK", nil, nil, nil); sqlite3_close(writer) }
+        XCTAssertEqual(sqlite3_exec(writer, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+        let started = ProcessInfo.processInfo.systemUptime
+        let lookup = AppleMusicLyricsCache().lookup(query, directory: directory)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1)
+        if case .unavailable(let message, let needsAccess) = lookup {
+            XCTAssertFalse(needsAccess)
+            XCTAssertTrue(message.contains("正忙"))
+        } else { XCTFail("An exclusively locked cache must be retried later") }
+    }
 }
 
 @MainActor

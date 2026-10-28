@@ -6,22 +6,48 @@ final class PlaybackClock: ObservableObject {
     @Published private(set) var revision: UInt64 = 0
     private var basePosition: Double = 0
     private var baseTime = Date()
+    private var baseUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var lastSampleUptime: TimeInterval?
+    private var correction: Double = 0
+    private var correctionDuration: Double = 0.4
     private var duration: Double = 0
     private var playing = false
     var offset: Double = 0 { didSet { if oldValue != offset { revision &+= 1 } } }
-    func update(position: Double, duration: Double, playing: Bool, at time: Date) {
-        basePosition = max(0, position.isFinite ? position : 0)
+    func update(position: Double, duration: Double, playing: Bool, at time: Date,
+                sampledAtUptime: TimeInterval? = nil, reset: Bool = false) {
+        let sample = sampledAtUptime.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        if !reset, let sample, let lastSampleUptime, sample <= lastSampleUptime { return }
+        let raw = max(0, position.isFinite ? position : 0)
+        let predicted = sample.map { self.position(atUptime: $0) } ?? raw
+        let error = raw - predicted
+        // 暂停、切歌或跳转立即定位；正常播放的小误差平滑校正，避免高亮反复回退。
+        let smooth = !reset && sample != nil && lastSampleUptime != nil && self.playing && playing && abs(error) < 0.45
+        basePosition = smooth ? predicted : raw
+        correction = smooth ? error : 0
+        correctionDuration = max(0.4, abs(correction) * 2)
         baseTime = time
+        baseUptime = sample ?? ProcessInfo.processInfo.systemUptime
+        lastSampleUptime = sample
         self.duration = duration.isFinite ? max(0, duration) : 0
         self.playing = playing
         revision &+= 1
     }
-    func position(at now: Date = Date()) -> Double {
-        let p = max(0, basePosition + (playing ? now.timeIntervalSince(baseTime) : 0))
+    func position(at now: Date? = nil) -> Double {
+        if let now { return projected(elapsed: now.timeIntervalSince(baseTime)) }
+        return position(atUptime: ProcessInfo.processInfo.systemUptime)
+    }
+    func position(atUptime now: TimeInterval) -> Double { projected(elapsed: now - baseUptime) }
+    private func projected(elapsed: Double) -> Double {
+        let elapsed = elapsed.isFinite ? max(0, elapsed) : 0
+        let adjusted = elapsed + correction * min(elapsed / correctionDuration, 1)
+        let p = max(0, basePosition + (playing ? adjusted : 0))
         return duration > 0 ? min(p, duration) : p
     }
-    func lyricPosition(at now: Date = Date()) -> Double { position(at: now) + offset }
-    func freeze() { basePosition = position(); baseTime = Date(); playing = false; revision &+= 1 }
+    func lyricPosition(at now: Date? = nil) -> Double { position(at: now) + offset }
+    func freeze() {
+        basePosition = position(); baseTime = Date(); baseUptime = ProcessInfo.processInfo.systemUptime
+        correction = 0; lastSampleUptime = nil; playing = false; revision &+= 1
+    }
 }
 
 enum LyricsPhase: Equatable { case idle, loading, ready, notFound, failed }
@@ -58,6 +84,8 @@ final class LyricsStore: ObservableObject {
     private var musicCacheTimer: Timer?
     private var musicCacheTask: Task<Void, Never>?
     private var musicCacheGeneration = UUID()
+    private var nextMusicCacheReadAt: TimeInterval = 0
+    private var musicCacheMisses = 0
     private var musicCacheDirectory: URL?
     private var musicCachePicker: NSOpenPanel?
     private var appleMusicReaderEnabled = false
@@ -134,13 +162,15 @@ final class LyricsStore: ObservableObject {
         self.preferences = preferences ?? TrackPreferences()
     }
 
-    func start(preview: Bool = false) {
+    func start(preview: Bool = false, appleMusicSync: Bool? = nil) {
         guard !started else { return }
         started = true
         isPreview = preview
+        // 启动时先恢复词源，让读取器一开始就采用对应的轻量策略。
+        if let appleMusicSync { appleMusicSyncEnabled = appleMusicSync }
         if preview { loadPreview() }
         else {
-            monitor = MusicMonitor { [weak self] snapshot in
+            monitor = MusicMonitor(automaticLyrics: !appleMusicSyncEnabled) { [weak self] snapshot in
                 Task { @MainActor in self?.handle(snapshot) }
             }
         }
@@ -168,7 +198,8 @@ final class LyricsStore: ObservableObject {
         }
         let recovered = connectionError != nil
         connectionError = nil
-        clock.update(position: s.position, duration: s.duration, playing: s.playing, at: s.polledAt)
+        clock.update(position: s.position, duration: s.duration, playing: s.playing, at: s.polledAt,
+                     sampledAtUptime: s.sampledAtUptime, reset: s.trackID != lastTrackID || s.resetPlaybackClock)
         lastSnapshot = s
         if s.trackID != lastTrackID || lastArtworkData != s.artworkData {
             lastArtworkData = s.artworkData
@@ -213,6 +244,7 @@ final class LyricsStore: ObservableObject {
         appleMusicReaderEnabled = startReaders
         let changed = appleMusicSyncEnabled != enabled
         appleMusicSyncEnabled = enabled
+        monitor?.setAutomaticLyricsEnabled(!enabled)
         if changed {
             fetchTask?.cancel(); prefetchTask?.cancel()
             cancelMusicCacheRead()
@@ -244,12 +276,14 @@ final class LyricsStore: ObservableObject {
     }
     private func cancelMusicCacheRead() {
         musicCacheGeneration = UUID()
+        nextMusicCacheReadAt = 0; musicCacheMisses = 0
         musicCacheTask?.cancel(); musicCacheTask = nil
         musicCacheChecking = false
     }
     private func readMusicCache(force: Bool = false) {
         guard appleMusicSyncEnabled, appleMusicReaderEnabled, !isPreview, hasTrack,
               (force || !(hasAppleTimedLyrics && wordSynced)), musicCacheTask == nil, let snapshot = lastSnapshot else { return }
+        guard force || ProcessInfo.processInfo.systemUptime >= nextMusicCacheReadAt else { return }
         let query = LyricsQuery(track: snapshot.title, artist: snapshot.artist, album: snapshot.album, duration: snapshot.duration)
         let directory = musicCacheDirectory ?? MusicLyricsCacheLocation.restored() ?? AppleMusicLyricsCache.defaultDirectory
         let generation = musicCacheGeneration
@@ -269,6 +303,9 @@ final class LyricsStore: ObservableObject {
         switch lookup {
         case .lyrics(let result):
             guard result.sourceID == "apple-cache", !result.lines.isEmpty, !result.isPlain else { return }
+            let unchanged = hasAppleTimedLyrics && lines == result.lines && wordSynced == result.isWordSynced
+            musicCacheMisses = 0
+            nextMusicCacheReadAt = result.isWordSynced ? .infinity : ProcessInfo.processInfo.systemUptime + (unchanged ? 30 : 4)
             musicCacheNeedsAccess = false
             musicCacheHint = result.isWordSynced ? "已读取 Apple Music 逐词时间。" : "已读取逐句时间，可选择估算的逐字高亮。"
             if let snapshot = lastSnapshot {
@@ -279,6 +316,8 @@ final class LyricsStore: ObservableObject {
             if hasAppleTimedLyrics, lines == result.lines, wordSynced == result.isWordSynced { return }
             applyResult(result)
         case .unavailable(let message, let needsAccess):
+            musicCacheMisses += 1
+            nextMusicCacheReadAt = needsAccess ? .infinity : ProcessInfo.processInfo.systemUptime + min(16, pow(2, Double(min(musicCacheMisses, 4))))
             musicCacheHint = message; musicCacheNeedsAccess = needsAccess
             if !hasAppleTimedLyrics {
                 phase = needsAccess ? .failed : .notFound
@@ -427,7 +466,10 @@ final class LyricsStore: ObservableObject {
         if !bypassCache, let hit = await cache.entry(for: snapshot.trackID) {
             guard !appleMusicSyncEnabled, !Task.isCancelled, lastTrackID == snapshot.trackID else { return }
             if let result = hit.result { applyResult(result, note: hit.note) }
-            else if !applyEmbeddedLyricsIfAvailable() { phase = .notFound; statusText = "未找到匹配的歌词" }
+            else if !applyEmbeddedLyricsIfAvailable() {
+                monitor?.requestEmbeddedLyrics(for: snapshot.trackID)
+                phase = .notFound; statusText = "未找到匹配的歌词"
+            }
             return
         }
         guard !appleMusicSyncEnabled, !Task.isCancelled, lastTrackID == snapshot.trackID else { return }
@@ -443,11 +485,15 @@ final class LyricsStore: ObservableObject {
             await cache.store(result: result, note: nil, for: snapshot.trackID)
         case .notFound:
             if !applyEmbeddedLyricsIfAvailable() {
+                monitor?.requestEmbeddedLyrics(for: snapshot.trackID)
                 phase = .notFound; statusText = "未找到匹配的歌词"
                 await cache.storeNotFound(for: snapshot.trackID)
             }
         case .failed(let description):
-            if !applyEmbeddedLyricsIfAvailable() { phase = .failed; statusText = description }
+            if !applyEmbeddedLyricsIfAvailable() {
+                monitor?.requestEmbeddedLyrics(for: snapshot.trackID)
+                phase = .failed; statusText = description
+            }
         }
     }
     private func schedulePrefetch(next: NextTrack?) {
@@ -463,7 +509,7 @@ final class LyricsStore: ObservableObject {
             await cache.store(result: result, note: outcome.isRomanizedFallback ? "拼音歌词" : nil, for: next.trackID)
         }
     }
-    func updateCurrentIndex(at now: Date = Date()) {
+    func updateCurrentIndex(at now: Date? = nil) {
         let position = clock.lyricPosition(at: now)
         let index = Self.lineIndex(at: position, times: lineStartTimes)
         if currentIndex != index { currentIndex = index }

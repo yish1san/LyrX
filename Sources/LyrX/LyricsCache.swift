@@ -17,8 +17,8 @@ actor LyricsCache {
     }
 
     /// 当前缓存版本：匹配策略或数据结构修正后递增，旧条目自动失效重取
-    /// v6：停用酷狗，旧条目重新匹配，避免复用已移除来源。
-    private static let currentVersion = 6
+    /// v7：重新解析旧歌词，恢复此前被丢弃的 LRC 停唱边界。
+    private static let currentVersion = 7
 
     private let positiveTTL: TimeInterval = 30 * 24 * 3600
     private let negativeTTL: TimeInterval = 6 * 3600

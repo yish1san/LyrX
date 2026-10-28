@@ -6,7 +6,18 @@ enum AppIdentity {
     static let legacyBundleID = "com.local.lyricsoverlay"
     static let migrationKey = "lyrx.didMigrateLegacyPreferences.v1"
 
+    static var hasAdaptiveIcon: Bool {
+        if #available(macOS 26.0, *) {
+            return Bundle.main.url(forResource: "Assets", withExtension: "car") != nil
+        }
+        return false
+    }
+
     @MainActor static var applicationIcon: NSImage? {
+        // 使用系统提供的图标表示，保留普通、深色和玻璃外观的切换能力。
+        if hasAdaptiveIcon, let icon = NSImage(named: NSImage.applicationIconName) {
+            return icon
+        }
         guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") else { return nil }
         return NSImage(contentsOf: url)
     }

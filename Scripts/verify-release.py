@@ -8,7 +8,7 @@ from pathlib import Path
 app = Path(sys.argv[1])
 allowed = {
     "Contents/Info.plist", "Contents/MacOS/LyrX",
-    "Contents/Resources/AppIcon.icns", "Contents/Resources/LICENSE",
+    "Contents/Resources/AppIcon.icns", "Contents/Resources/Assets.car", "Contents/Resources/LICENSE",
     "Contents/_CodeSignature/CodeResources",
 }
 checks = {
@@ -32,6 +32,8 @@ for path in app.rglob("*"):
         if re.search(pattern, data):
             errors.append(label)
 info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+if info.get("CFBundleIconName") == "AppIcon" and not (app / "Contents/Resources/Assets.car").is_file():
+    errors.append("缺少系统图标资源")
 if "NSAppTransportSecurity" in info:
     errors.append("发布配置仍含传输安全例外")
 if info.get("CFBundleName") != "LyrX" or info.get("CFBundleIdentifier") != "com.local.lyrx":

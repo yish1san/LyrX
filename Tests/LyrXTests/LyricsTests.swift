@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import CryptoKit
 @testable import LyrX
 
 final class LyricsTests: XCTestCase {
@@ -11,6 +12,20 @@ final class LyricsTests: XCTestCase {
     func testTranslationsShareOneTimestampWithoutDuplicates() {
         let lines = LRCParser.parse("[00:01]Hello\n[00:01]你好\n[00:01]Hello\n[00:00]作词：某人")
         XCTAssertEqual(lines, [LyricLine(time: 1, text: "Hello\n你好")])
+    }
+    func testEmptyLRCTimestampsEndSingingWithoutCreatingEmptyDisplayRows() {
+        let lines = LRCParser.parse("[00:10]你好\n[00:14]\n[00:20]\n[00:40]下一句\n[00:44]")
+        XCTAssertEqual(lines.map(\.time), [10, 40])
+        XCTAssertEqual(lines.map(\.endTime), [14, 44])
+        let end = LyricHighlightPlan.end(of: lines[0], nextTime: 40, duration: 100)
+        XCTAssertEqual(end, 14)
+        XCTAssertTrue(LyricHighlightPlan(line: lines[0], end: end).glyphs.allSatisfy { $0.progress(at: 15) == 1 })
+    }
+    func testLRCStopsRespectOffsetsTranslationsAndLaterVerses() {
+        let lines = LRCParser.parse("[offset:-500]\n[00:01][00:10]Hello\n[00:01]\n[00:01]你好\n[00:03][00:12] \n[00:07]Another\n[00:05]作曲：某人\n[00:99]")
+        XCTAssertEqual(lines.map(\.time), [0.5, 6.5, 9.5])
+        XCTAssertEqual(lines.map(\.endTime), [2.5, nil, 11.5])
+        XCTAssertEqual(lines.first?.text, "Hello\n你好")
     }
     func testTitleMatchingRejectsSubstringsButAllowsDualTitles() {
         XCTAssertFalse(TextNormalizer.looselyEqual("爱", "爱情"))
@@ -131,6 +146,21 @@ final class LyricsTests: XCTestCase {
         let secondCache = LyricsCache(directory: directory)
         let disk = await secondCache.entry(for: "two")
         XCTAssertEqual(disk?.result?.lines, result.lines)
+    }
+    func testCacheParsedWithoutStopBoundariesIsRefetchedButNewBoundariesPersist() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let key = "song", cache = LyricsCache(directory: directory)
+        let path = directory.appendingPathComponent(SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined() + ".json")
+        let old = LyricsCache.Entry(result: LyricsResult(lines: [LyricLine(time: 10, text: "Hello")], sourceID: "lrclib", isWordSynced: false), fetchedAt: Date(), negative: false, version: 6)
+        try JSONEncoder().encode(old).write(to: path)
+        let stale = await cache.entry(for: key)
+        XCTAssertNil(stale)
+        let result = LyricsResult(lines: LRCParser.parse("[00:10]Hello\n[00:14]\n[00:40]Again"), sourceID: "lrclib", isWordSynced: false)
+        await cache.store(result: result, note: nil, for: key)
+        let restored = await LyricsCache(directory: directory).entry(for: key)
+        XCTAssertEqual(restored?.result?.lines.first?.endTime, 14)
     }
 }
 

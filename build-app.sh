@@ -2,8 +2,8 @@
 # 构建 LyrX，每次创建独立发布文件夹，App 名称保持 LyrX.app。
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="1.0.2"
-BUILD_NUMBER="144"
+VERSION="1.0.6"
+BUILD_NUMBER="148"
 RELEASE_DIR="${1:-releases/LyrX-${VERSION}-$(date +%Y%m%d-%H%M%S)}"
 if [[ -e "$RELEASE_DIR" ]]; then
     echo "输出目录已存在，请使用新文件夹：$RELEASE_DIR" >&2
@@ -16,6 +16,7 @@ APP="$RELEASE_DIR/LyrX.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -X .build/release/LyrX "$APP/Contents/MacOS/LyrX"
 cp -X Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp -X Resources/Assets.car "$APP/Contents/Resources/Assets.car"
 cp -X LICENSE "$APP/Contents/Resources/LICENSE"
 # 先移除调试和本地符号，再签名；Swift 的运行时元数据保持可用。
 strip -S -x "$APP/Contents/MacOS/LyrX"
@@ -32,6 +33,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>LyrX</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
     <key>LSUIElement</key><true/>

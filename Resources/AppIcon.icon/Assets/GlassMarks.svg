@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="115 115 1024 1024">
+  <defs>
+    <path id="quote" d="M407 321 C386 363 350 412 334 457 L365 457 C387 457 398 471 398 493 L398 540 C398 563 385 575 363 575 L286 575 C265 575 253 562 253 540 L253 492 C253 442 276 412 313 382 C348 355 389 334 407 321 Z"/>
+    <path id="refraction" d="M253 513 C226 489 197 464 180 418 C158 356 157 270 198 195 C163 216 141 256 138 303 C134 383 160 445 202 489 C221 507 238 518 253 529 Z"/>
+  </defs>
+  <g fill="#333940" opacity="0.72">
+    <use href="#refraction"/>
+    <use href="#refraction" transform="translate(1260 1300) rotate(180)"/>
+  </g>
+  <g fill="#11171c">
+    <use href="#quote"/>
+    <use href="#quote" transform="translate(153 0)"/>
+    <use href="#quote" transform="translate(1260 1300) rotate(180)"/>
+    <use href="#quote" transform="translate(1107 1300) rotate(180)"/>
+    <rect x="402" y="618" width="451" height="54" rx="27"/>
+  </g>
+  <rect x="410" y="720" width="271" height="45" rx="22.5" fill="#5c6269"/>
+</svg>

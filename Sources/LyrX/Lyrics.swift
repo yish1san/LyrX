@@ -15,7 +15,7 @@ struct LyricLine: Equatable, Codable, Sendable {
     var words: [LyricWord]? = nil
 }
 
-/// LRC 格式解析（支持一行多时间戳；过滤空行与网易云 credits 行）
+/// LRC 格式解析（支持一行多时间戳；空时间戳保留为停唱边界，不显示空行）
 enum LRCParser {
     private static let pattern = #"\[(\d{1,3}):(\d{1,2}(?:\.\d{1,3})?)\]"#
     // 网易云 LRC 开头的制作信息行（作词/作曲/编曲/弦乐编写等），不作为歌词行展示
@@ -29,23 +29,34 @@ enum LRCParser {
         let offset = offsetRE.firstMatch(in: lrc, range: NSRange(location: 0, length: fullText.length))
             .flatMap { Double(fullText.substring(with: $0.range(at: 1))) }.map { $0 / 1000 } ?? 0
         var grouped: [Double: [String]] = [:]
+        var stops: Set<Double> = []
         for raw in lrc.components(separatedBy: .newlines) {
             let ns = raw as NSString
             let range = NSRange(location: 0, length: ns.length)
             let matches = re.matches(in: raw, range: range)
             let text = re.stringByReplacingMatches(in: raw, range: range, withTemplate: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !matches.isEmpty, !text.isEmpty,
+            guard !matches.isEmpty,
                   credits.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil else { continue }
             for m in matches {
                 guard let minutes = Double(ns.substring(with: m.range(at: 1))),
                       let seconds = Double(ns.substring(with: m.range(at: 2))), seconds < 60 else { continue }
                 let time = max(0, minutes * 60 + seconds + offset)
+                if text.isEmpty { stops.insert(time); continue }
                 if !(grouped[time] ?? []).contains(text) { grouped[time, default: []].append(text) }
             }
         }
         // 同一时间戳的原文与译文合为一行，避免二分查找只显示最后一条。
-        return grouped.keys.sorted().map { LyricLine(time: $0, text: grouped[$0]!.joined(separator: "\n")) }
+        let times = grouped.keys.sorted()
+        let boundaries = stops.subtracting(grouped.keys).sorted()
+        var stopIndex = 0
+        return times.enumerated().map { index, time in
+            while stopIndex < boundaries.count, boundaries[stopIndex] <= time { stopIndex += 1 }
+            let stop = stopIndex < boundaries.count ? boundaries[stopIndex] : nil
+            let next = index + 1 < times.count ? times[index + 1] : .infinity
+            return LyricLine(time: time, text: grouped[time]!.joined(separator: "\n"),
+                             endTime: stop.flatMap { $0 < next ? $0 : nil })
+        }
     }
 }
 

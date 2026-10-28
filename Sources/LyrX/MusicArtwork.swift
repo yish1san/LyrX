@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 enum MusicArtwork {
     static let scriptSource = #"""
     if application "Music" is not running then return {}
-    with timeout of 3 seconds
+    with timeout of 1 second
         tell application "Music"
             try
                 set t to current track
@@ -14,14 +14,24 @@ enum MusicArtwork {
                 set ar to (artist of t) as text
                 set al to (album of t) as text
                 set coverData to missing value
-                set lyricText to ""
                 try
                     if (count of artworks of t) > 0 then set coverData to raw data of artwork 1 of t
                 end try
-                try
-                    set lyricText to (lyrics of t) as text
-                end try
-                return {nm, ar, al, coverData, lyricText}
+                return {nm, ar, al, coverData}
+            on error
+                return {}
+            end try
+        end tell
+    end timeout
+    """#
+
+    static let embeddedLyricsScriptSource = #"""
+    if application "Music" is not running then return {}
+    with timeout of 1 second
+        tell application "Music"
+            try
+                set t to current track
+                return {name of t as text, artist of t as text, album of t as text, lyrics of t as text}
             on error
                 return {}
             end try
