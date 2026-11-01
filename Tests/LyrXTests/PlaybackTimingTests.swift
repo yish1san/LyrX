@@ -38,33 +38,38 @@ final class NativePlaybackTimingTests: XCTestCase {
     private func result(_ times: [Double] = [0, 1, 2]) -> LyricsResult {
         LyricsResult(lines: times.enumerated().map { LyricLine(time: $0.element, text: "Line \($0.offset)") }, sourceID: "apple-cache", isWordSynced: false)
     }
-    func testNativeModeReportsMissingDataWithoutWaitingForAnyWindow() {
+    func testFirstCacheMissKeepsLoadingAndLaterMissDoesNotClaimSongHasNoLyrics() {
         store.handle(state())
         store.handleMusicCacheLookup(.unavailable(message: "No cached lyrics", needsAccess: false), trackID: "one")
-        XCTAssertEqual(store.phase, .notFound)
+        XCTAssertEqual(store.phase, .loading)
         XCTAssertTrue(store.lines.isEmpty)
-        XCTAssertEqual(store.currentSourceTitle, "暂无 Music 本地歌词")
-        XCTAssertEqual(store.overlayStatusText, "暂无本地歌词")
+        XCTAssertEqual(store.currentSourceTitle, "Apple Music")
+        XCTAssertEqual(store.overlayStatusText, "正在读取歌词…")
+        store.handleMusicCacheLookup(.unavailable(message: "Not cached yet", needsAccess: false), trackID: "one",
+                                    atUptime: ProcessInfo.processInfo.systemUptime + 13)
+        XCTAssertEqual(store.phase, .notFound)
+        XCTAssertEqual(store.currentSourceTitle, "Apple Music")
+        XCTAssertEqual(store.overlayStatusText, "本地歌词尚未就绪")
         store.handleMusicCacheLookup(.lyrics(result()), trackID: "one")
         XCTAssertTrue(store.hasAppleTimedLyrics)
         XCTAssertEqual(store.overlayStatusText, "已暂停")
     }
     func testMusicCalibrationUses50msStepsAndDoesNotChangeAutomaticOffset() throws {
         try preferences.save(TrackPreferences.Entry(offset: 1.5), for: "one")
-        store.handle(state(position: 0.95))
+        store.handle(state(position: 0.75))
         store.handleMusicCacheLookup(.lyrics(result()), trackID: "one")
-        XCTAssertEqual(store.timingOffset, 0)
+        XCTAssertEqual(store.timingOffset, 0.20)
         XCTAssertTrue(store.canCalibrate)
         XCTAssertEqual(store.currentIndex, 0)
-        store.setTimingOffset(0.05)
-        XCTAssertEqual(store.timingOffset, 0.05, accuracy: 0.000001)
+        store.setTimingOffset(0.25)
+        XCTAssertEqual(store.timingOffset, 0.25, accuracy: 0.000001)
         XCTAssertEqual(store.currentIndex, 1)
         XCTAssertEqual(preferences.entry(for: "one").offset, 1.5)
-        XCTAssertEqual(preferences.entry(for: "one").musicOffset, 0.05)
+        XCTAssertEqual(preferences.entry(for: "one").musicOffset, 0.25)
         store.setAppleMusicSyncEnabled(false, startReaders: false)
         XCTAssertEqual(store.timingOffset, 1.5)
         store.setAppleMusicSyncEnabled(true, startReaders: false)
-        XCTAssertEqual(store.timingOffset, 0.05)
+        XCTAssertEqual(store.timingOffset, 0.25)
         XCTAssertEqual(store.currentIndex, 1)
     }
     func testOldTrackPreferencesDecodeWithNoMusicOffsetAndBothPersist() throws {
@@ -98,7 +103,7 @@ final class NativePlaybackTimingTests: XCTestCase {
         store.handle(state(position: 0, playing: true))
         let advanced = expectation(description: "Crossed both lyric boundaries without a new playback snapshot")
         let subscription = store.$currentIndex.sink { index in if index == 2 { advanced.fulfill() } }
-        store.handleMusicCacheLookup(.lyrics(result([0, 0.05, 0.12])), trackID: "one")
+        store.handleMusicCacheLookup(.lyrics(result([0, 0.25, 0.32])), trackID: "one")
         await fulfillment(of: [advanced], timeout: 1)
         XCTAssertEqual(store.currentIndex, 2)
         withExtendedLifetime(subscription) {}

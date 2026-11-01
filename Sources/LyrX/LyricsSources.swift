@@ -30,6 +30,10 @@ protocol LyricsSource {
 
 /// TTML（AMLL）：<p begin end><span begin end>词</span>…</p>，时间格式 "mm:ss.mmm" 或 "12.3s"
 enum TTMLParser {
+    struct Document {
+        var lines: [LyricLine]
+        var plainText: String
+    }
     private final class Node {
         enum Content { case text(String), node(Node) }
         let name: String
@@ -52,6 +56,7 @@ enum TTMLParser {
     private final class Reader: NSObject, XMLParserDelegate {
         var stack: [Node] = []
         var lines: [LyricLine] = []
+        var paragraphs: [String] = []
         func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) {
             let node = Node(name.split(separator: ":").last.map(String.init) ?? name, attributes)
             stack.last?.content.append(.node(node)); stack.append(node)
@@ -61,6 +66,7 @@ enum TTMLParser {
             guard let node = stack.popLast(), node.name == "p", !node.excluded else { return }
             let plain = node.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !plain.isEmpty else { return }
+            paragraphs.append(plain)
             var spans: [(text: String, start: Double, end: Double?)] = []
             func collect(_ node: Node) {
                 guard !node.excluded else { return }
@@ -103,11 +109,15 @@ enum TTMLParser {
         }
     }
     static func parse(_ xml: String) -> [LyricLine] {
+        document(xml)?.lines ?? []
+    }
+    static func document(_ xml: String) -> Document? {
         let parser = XMLParser(data: Data(xml.utf8))
         parser.shouldResolveExternalEntities = false
         let reader = Reader(); parser.delegate = reader
-        guard parser.parse() else { return [] }
-        return reader.lines.sorted { $0.time < $1.time }
+        guard parser.parse(), !reader.paragraphs.isEmpty else { return nil }
+        return Document(lines: reader.lines.sorted { $0.time < $1.time },
+                        plainText: reader.paragraphs.joined(separator: "\n"))
     }
     private static func parseTime(_ value: String) -> Double? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)

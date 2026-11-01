@@ -4,10 +4,22 @@ import CryptoKit
 /// 用户修正独立于网络缓存，缓存过期不会覆盖手动歌词或校准。
 @MainActor
 final class TrackPreferences {
+    nonisolated static let defaultTimingOffset: Double = 0.20
     struct Entry: Codable {
-        var offset: Double = 0
+        var offset: Double = TrackPreferences.defaultTimingOffset
         var lyrics: LyricsResult?
         var musicOffset: Double?
+
+        init(offset: Double = TrackPreferences.defaultTimingOffset, lyrics: LyricsResult? = nil, musicOffset: Double? = nil) {
+            self.offset = offset; self.lyrics = lyrics; self.musicOffset = musicOffset
+        }
+        private enum CodingKeys: String, CodingKey { case offset, lyrics, musicOffset }
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            offset = try values.decodeIfPresent(Double.self, forKey: .offset) ?? TrackPreferences.defaultTimingOffset
+            lyrics = try values.decodeIfPresent(LyricsResult.self, forKey: .lyrics)
+            musicOffset = try values.decodeIfPresent(Double.self, forKey: .musicOffset)
+        }
     }
     private let directory: URL
     init(directory: URL? = nil) {

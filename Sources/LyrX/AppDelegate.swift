@@ -12,6 +12,23 @@ final class OverlayPanel: NSPanel {
     /// 边缘 8pt 缩放；其余点击正常交给 SwiftUI 控件。
     private let edgeMargin: CGFloat = 8
     var lyricsOnly = false
+    private(set) var sizeLimits = OverlayWindowSizing(minimum: NSSize(width: 380, height: 220))
+
+    func setSizeLimits(minimum: NSSize) {
+        sizeLimits.minimum = minimum
+        contentMinSize = minimum
+        minSize = minimum
+        contentMaxSize = sizeLimits.maximum
+        maxSize = sizeLimits.maximum
+    }
+
+    // AppKit 的这两个 setFrame 入口不会自动遵守 minSize，必须再次限制。
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(sizeLimits.clamped(frameRect), display: flag)
+    }
+    override func setFrame(_ frameRect: NSRect, display flag: Bool, animate animateFlag: Bool) {
+        super.setFrame(sizeLimits.clamped(frameRect), display: flag, animate: animateFlag)
+    }
 
     private struct ResizeEdges: OptionSet {
         let rawValue: Int
@@ -20,18 +37,43 @@ final class OverlayPanel: NSPanel {
         static let top    = ResizeEdges(rawValue: 1 << 2)
         static let bottom = ResizeEdges(rawValue: 1 << 3)
     }
+    private struct ResizeSession {
+        var edges: ResizeEdges
+        var frame: NSRect
+        var mouse: NSPoint
+    }
+    private var resizeSession: ResizeSession?
 
     /// 无边框窗口自行处理边缘缩放，不能吞掉按钮、滚动和歌词点击事件。
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown {
+            resizeSession = nil
             let edges = resizeEdges(at: event.locationInWindow)
             if !edges.isEmpty {
-                runResizeSession(edges: edges)
+                resizeSession = ResizeSession(edges: edges, frame: frame,
+                                              mouse: convertPoint(toScreen: event.locationInWindow))
                 return
             }
             if lyricsOnly { performDrag(with: event); return }
         }
+        if event.type == .leftMouseDragged, let session = resizeSession {
+            resize(session, to: convertPoint(toScreen: event.locationInWindow))
+            return
+        }
+        if event.type == .leftMouseUp, resizeSession != nil {
+            resizeSession = nil
+            return
+        }
+        if event.type == .keyDown, event.keyCode == 53, resizeSession != nil {
+            resizeSession = nil
+            return
+        }
         super.sendEvent(event)
+    }
+
+    override func orderOut(_ sender: Any?) {
+        resizeSession = nil
+        super.orderOut(sender)
     }
 
     private func resizeEdges(at loc: NSPoint) -> ResizeEdges {
@@ -43,42 +85,32 @@ final class OverlayPanel: NSPanel {
         return edges
     }
 
-    /// 模态事件循环实现边缘缩放，含 min/max 尺寸约束。
-    private func runResizeSession(edges: ResizeEdges) {
-        let initialFrame = frame
-        let initialMouse = NSEvent.mouseLocation
-        while true {
-            guard let ev = NSApp.nextEvent(
-                matching: [.leftMouseDragged, .leftMouseUp],
-                until: .distantFuture, inMode: .default, dequeue: true
-            ) else { continue }
-            if ev.type == .leftMouseUp { break }
-
-            let mouse = NSEvent.mouseLocation
-            let dx = mouse.x - initialMouse.x
-            let dy = mouse.y - initialMouse.y
-            var f = initialFrame
-
-            if edges.contains(.right) {
-                f.size.width = (initialFrame.width + dx)
-                    .clamped(to: minSize.width...maxSize.width)
-            }
-            if edges.contains(.left) {
-                f.size.width = (initialFrame.width - dx)
-                    .clamped(to: minSize.width...maxSize.width)
-                f.origin.x = initialFrame.maxX - f.size.width
-            }
-            if edges.contains(.top) {
-                f.size.height = (initialFrame.height + dy)
-                    .clamped(to: minSize.height...maxSize.height)
-            }
-            if edges.contains(.bottom) {
-                f.size.height = (initialFrame.height - dy)
-                    .clamped(to: minSize.height...maxSize.height)
-                f.origin.y = initialFrame.maxY - f.size.height
-            }
-            setFrame(f, display: true, animate: false)
+    /// 每个拖动事件只更新一帧，立即回到主循环，让 SwiftUI 与原生材质正常布局、绘制。
+    private func resize(_ session: ResizeSession, to mouse: NSPoint) {
+        let initialFrame = session.frame
+        let edges = session.edges
+        let dx = mouse.x - session.mouse.x
+        let dy = mouse.y - session.mouse.y
+        var f = initialFrame
+        if edges.contains(.right) {
+            f.size.width = (initialFrame.width + dx)
+                .clamped(to: sizeLimits.minimum.width...sizeLimits.maximum.width)
         }
+        if edges.contains(.left) {
+            f.size.width = (initialFrame.width - dx)
+                .clamped(to: sizeLimits.minimum.width...sizeLimits.maximum.width)
+            f.origin.x = initialFrame.maxX - f.size.width
+        }
+        if edges.contains(.top) {
+            f.size.height = (initialFrame.height + dy)
+                .clamped(to: sizeLimits.minimum.height...sizeLimits.maximum.height)
+        }
+        if edges.contains(.bottom) {
+            f.size.height = (initialFrame.height - dy)
+                .clamped(to: sizeLimits.minimum.height...sizeLimits.maximum.height)
+            f.origin.y = initialFrame.maxY - f.size.height
+        }
+        setFrame(f, display: true, animate: false)
     }
 }
 
@@ -107,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     let settings: OverlaySettings = {
         if AppIdentity.isPreview {
             let settings = OverlaySettings(temporary: true)
-            settings.followMusicLyrics = CommandLine.arguments.contains("--preview-apple-lines")
+            settings.followMusicLyrics = CommandLine.arguments.contains("--preview-apple-lines") || CommandLine.arguments.contains("--preview-apple-static")
             return settings
         }
         return OverlaySettings()
@@ -132,15 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let hosting = InteractiveHostingView(rootView: AppearanceRoot(content: content).environmentObject(settings))
         // 窗口大小由面板管理，避免 SwiftUI 根据旧布局提高 minSize，卡住精简模式高度。
         hosting.sizingOptions = []
+        hosting.autoresizingMask = [.width, .height]
         panel = OverlayPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: settings.windowHeight),
                              styleMask: [.nonactivatingPanel, .resizable], backing: .buffered, defer: false)
         panel.title = "LyrX"
         panel.isOpaque = false; panel.backgroundColor = .clear
         panel.hasShadow = true; panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
-        panel.minSize = NSSize(width: 380, height: settings.minimumWindowHeight)
-        panel.maxSize = NSSize(width: 1000, height: 900)
         panel.contentView = hosting
+        panel.setSizeLimits(minimum: settings.minimumWindowSize)
         panel.isReleasedWhenClosed = false
         if !preview, let saved = UserDefaults.standard.string(forKey: "overlay.windowFrame") {
             var frame = NSRectFromString(saved)
@@ -169,11 +201,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         store.start(preview: preview, appleMusicSync: settings.followMusicLyrics)
         store.setAppleMusicSyncEnabled(settings.followMusicLyrics)
         applyBehavior()
+        if preview, CommandLine.arguments.contains("--preview-smallest-window") {
+            panel.setFrame(NSRect(origin: panel.frame.origin, size: NSSize(width: 1, height: 1)), display: true)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) { globalShortcut.stop(); store.stop(); saveFrame() }
     func windowDidMove(_ notification: Notification) { if notification.object as? NSWindow === panel { saveFrame() } }
     func windowDidResize(_ notification: Notification) { if notification.object as? NSWindow === panel { saveFrame() } }
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        (sender as? OverlayPanel)?.sizeLimits.clamped(frameSize) ?? frameSize
+    }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === panel { setVisible(false); return false }
         return true
@@ -183,7 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     private func applyWindowHeight() {
         guard let panel else { return }
-        panel.minSize = NSSize(width: 380, height: settings.minimumWindowHeight)
+        panel.setSizeLimits(minimum: settings.minimumWindowSize)
         var frame = panel.frame
         if let bounds = (panel.screen ?? NSScreen.main)?.visibleFrame {
             frame.size.height = min(settings.windowHeight, bounds.height)

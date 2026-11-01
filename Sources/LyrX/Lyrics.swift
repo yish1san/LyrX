@@ -94,6 +94,13 @@ enum TextNormalizer {
     /// 仅提取明确的“中文标题 English title”两段；是否采纳仍需艺人及近似时长校验。
     static func bilingualAliases(_ title: String) -> [String] {
         let normalized = normalizeTitle(title)
+        // Music 的本地化元数据也使用「中文 (English)」或「English（中文）」。
+        if let range = normalized.range(of: #"[（(]([^()（）]+)[)）]$"#, options: .regularExpression) {
+            let first = String(normalized[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let second = String(normalized[range].dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            let cjkFirst = LyricQuality.containsCJK(first), cjkSecond = LyricQuality.containsCJK(second)
+            if cjkFirst != cjkSecond, first.count >= 2, second.count >= 2 { return [first, second] }
+        }
         guard let range = normalized.range(of: #"(?<=[\p{Han}\p{Hiragana}\p{Katakana}])\s+(?=[A-Za-z])"#, options: .regularExpression) else { return [] }
         let first = String(normalized[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
         let second = String(normalized[range.upperBound...]).trimmingCharacters(in: .whitespaces)

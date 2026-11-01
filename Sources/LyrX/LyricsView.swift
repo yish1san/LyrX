@@ -129,6 +129,38 @@ private struct ProgressLyricText: View {
     }
 }
 
+private struct IntroCountdown: View {
+    @ObservedObject var clock: PlaybackClock
+    let end: Double
+    let playing: Bool
+    let baseColor: Color
+    let accent: Color
+    let centered: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Group {
+            if playing {
+                TimelineView(.periodic(from: .now, by: reduceMotion ? 0.1 : 1 / 30)) { _ in dots }
+            } else { dots }
+        }
+        .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("前奏")
+        .transaction { $0.animation = nil }
+    }
+    private var dots: some View {
+        HStack(spacing: 7) {
+            ForEach(0..<3) { index in
+                let progress = LyricIntroProgress.dot(index, at: clock.lyricPosition(), end: end)
+                Circle().fill(baseColor.opacity(0.35))
+                    .overlay { Circle().fill(accent).opacity(progress) }
+                    .frame(width: 5, height: 5)
+                    .scaleEffect(reduceMotion ? 1 : 0.85 + 0.15 * progress)
+            }
+        }
+    }
+}
+
 struct LyricsView: View {
     @EnvironmentObject var store: LyricsStore
     @EnvironmentObject var settings: OverlaySettings
@@ -282,7 +314,7 @@ struct LyricsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: settings.centered ? .center : .leading)
                 .padding(.horizontal, 24)
         } else {
-            Text(store.appleMusicSyncEnabled && store.hasTrack ? (store.phase == .loading ? "正在读取本地歌词…" : "暂无 Music 本地歌词") : store.phase == .loading ? "正在匹配歌词…" : store.phase == .notFound ? "未找到歌词" : store.phase == .failed ? "歌词获取失败" : "播放音乐后显示歌词")
+            Text(store.connecting && !store.hasTrack ? "正在连接 Apple Music…" : store.appleMusicSyncEnabled && store.hasTrack ? store.musicEmptyTitle : store.phase == .loading ? "正在匹配歌词…" : store.phase == .notFound ? "未找到歌词" : store.phase == .failed ? "歌词获取失败" : "播放音乐后显示歌词")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -298,11 +330,9 @@ struct LyricsView: View {
         .padding(.horizontal, 24).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var intro: some View {
-        HStack(spacing: 7) {
-            ForEach(0..<3) { _ in Circle().fill(.secondary.opacity(0.5)).frame(width: 5, height: 5) }
-        }
-        .frame(maxWidth: .infinity, alignment: settings.centered ? .center : .leading)
-        .accessibilityLabel("前奏")
+        IntroCountdown(clock: store.clock, end: store.lines.first?.time ?? 0,
+                       playing: store.playing && store.connectionError == nil,
+                       baseColor: settings.lyricColor, accent: settings.highlightColor, centered: settings.centered)
     }
     private func row(_ line: LyricLine, at index: Int) -> some View {
         LyricRow(line: line, current: index == store.currentIndex, past: index < store.currentIndex,
@@ -364,7 +394,7 @@ struct LyricsView: View {
 
     private var emptyState: some View {
         VStack(spacing: 10) {
-            if store.phase == .loading && !store.appleMusicSyncEnabled { ProgressView().controlSize(.small) }
+            if store.phase == .loading || store.connecting { ProgressView().controlSize(.small) }
             else { Image(systemName: emptyIcon).font(.system(size: 25, weight: .light)).foregroundStyle(.tertiary) }
             Text(emptyTitle).font(.system(size: 14, weight: .medium))
             Text(emptyDescription).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -382,10 +412,16 @@ struct LyricsView: View {
             }
         }.padding(18).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    private var emptyIcon: String { store.phase == .failed ? "wifi.exclamationmark" : store.phase == .notFound ? "text.magnifyingglass" : "music.note" }
-    private var emptyTitle: String {
+    private var emptyIcon: String {
         if store.appleMusicSyncEnabled && store.hasTrack {
-            return store.phase == .loading ? "正在读取 Music 本地歌词" : "暂无 Music 本地歌词"
+            return store.musicCacheNeedsAccess ? "lock.doc" : "text.magnifyingglass"
+        }
+        return store.phase == .failed ? "wifi.exclamationmark" : store.phase == .notFound ? "text.magnifyingglass" : "music.note"
+    }
+    private var emptyTitle: String {
+        if store.connecting && !store.hasTrack { return "正在连接 Apple Music…" }
+        if store.appleMusicSyncEnabled && store.hasTrack {
+            return store.musicEmptyTitle
         }
         return switch store.phase {
         case .loading: "正在寻找这一首的歌词"
@@ -395,6 +431,7 @@ struct LyricsView: View {
         }
     }
     private var emptyDescription: String {
+        if store.connecting && !store.hasTrack { return "正在等待 Music 提供当前歌曲。" }
         if store.appleMusicSyncEnabled && store.hasTrack { return store.musicCacheHint }
         return switch store.phase {
         case .loading: "正在获取歌词…"
@@ -408,8 +445,13 @@ struct LyricsView: View {
             Image(systemName: "lock.shield").font(.title2).foregroundStyle(.secondary)
             Text("连接 Apple Music").font(.headline)
             Text(error).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Button("打开自动化设置") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") { NSWorkspace.shared.open(url) }
+            HStack {
+                Button("重试连接") { store.retryConnection() }
+                if error.contains("自动化") {
+                    Button("打开自动化设置") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") { NSWorkspace.shared.open(url) }
+                    }
+                }
             }.controlSize(.small)
         }.padding(22).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -421,8 +463,17 @@ struct TimingCalibrationView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("歌词时间校准").font(.headline)
             Text(store.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            Text("此曲单独保存，Music 与其他词源分别校准。正数提前，负数延后。")
+            Text(store.calibrationDescription)
                 .font(.caption).foregroundStyle(.secondary)
+            TimingCalibrationControls()
+        }.padding(20).frame(width: 280)
+    }
+}
+
+struct TimingCalibrationControls: View {
+    @EnvironmentObject var store: LyricsStore
+    var body: some View {
+        VStack(spacing: 12) {
             HStack {
                 Button { store.setTimingOffset(store.timingOffset - 0.05) } label: { Image(systemName: "minus") }
                     .disabled(store.timingOffset <= -10).accessibilityLabel("歌词延后 0.05 秒")
@@ -432,9 +483,11 @@ struct TimingCalibrationView: View {
                 Button { store.setTimingOffset(store.timingOffset + 0.05) } label: { Image(systemName: "plus") }
                     .disabled(store.timingOffset >= 10).accessibilityLabel("歌词提前 0.05 秒")
             }
-            Slider(value: Binding(get: { store.timingOffset }, set: { store.setTimingOffset($0) }), in: -10...10, step: 0.05)
+            // 存储层统一按 0.05 秒取整；不生成 401 个原生滑条刻度。
+            Slider(value: Binding(get: { store.timingOffset }, set: { store.setTimingOffset($0) }), in: -10...10)
                 .accessibilityLabel("歌词时间差")
-            Button("重置为零") { store.setTimingOffset(0) }.disabled(store.timingOffset == 0)
-        }.padding(20).frame(width: 280).disabled(!store.canCalibrate)
+            Button("恢复默认 +0.20 秒") { store.resetTimingOffset() }
+                .disabled(store.timingOffset == TrackPreferences.defaultTimingOffset)
+        }.disabled(!store.canCalibrate)
     }
 }

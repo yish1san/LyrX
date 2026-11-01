@@ -92,7 +92,7 @@ final class AppleMusicCacheTests: XCTestCase {
         } else { XCTFail("Invalid file path must not be read") }
         let missing = directory.appendingPathComponent("missing")
         if case .unavailable(_, let needsAccess) = AppleMusicLyricsCache().lookup(query, directory: missing) {
-            XCTAssertTrue(needsAccess)
+            XCTAssertFalse(needsAccess, "Missing cache is not an authorization failure")
         } else { XCTFail("Missing cache must report access state") }
     }
     func testBusyMusicCacheReturnsPromptlyWithoutAskingForAccessOrChangingIt() throws {
@@ -106,10 +106,7 @@ final class AppleMusicCacheTests: XCTestCase {
         let started = ProcessInfo.processInfo.systemUptime
         let lookup = AppleMusicLyricsCache().lookup(query, directory: directory)
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1)
-        if case .unavailable(let message, let needsAccess) = lookup {
-            XCTAssertFalse(needsAccess)
-            XCTAssertTrue(message.contains("正忙"))
-        } else { XCTFail("An exclusively locked cache must be retried later") }
+        if case .busy = lookup {} else { XCTFail("An exclusively locked cache must be retried later") }
     }
 }
 

@@ -80,8 +80,9 @@ final class OverlaySettings: ObservableObject {
 
     var rowHeight: CGFloat { CGFloat(fontSize) * 1.55 + 8 }
     var isTransparent: Bool { appearance == .transparent }
-    var minimumWindowHeight: CGFloat { compact ? 72 : 180 }
-    var windowHeight: CGFloat { compact ? rowHeight * 2 + 16 : rowHeight * CGFloat(visibleLines) + 122 }
+    var minimumWindowHeight: CGFloat { compact ? rowHeight * 2 + 16 : max(220, rowHeight * 2 + 122) }
+    var minimumWindowSize: NSSize { NSSize(width: 380, height: minimumWindowHeight) }
+    var windowHeight: CGFloat { max(minimumWindowHeight, compact ? rowHeight * 2 + 16 : rowHeight * CGFloat(visibleLines) + 122) }
     private func save(_ value: Any, _ key: String) { if !temporary { defaults.set(value, forKey: "overlay.\(key)") } }
 
     func resetAppearance() {
@@ -217,7 +218,7 @@ private struct LyricsSourcesView: View {
             Section("歌词来源") {
                 LabeledContent("当前词源", value: store.currentSourceTitle)
                 Toggle("同步 Apple Music 歌词", isOn: $settings.followMusicLyrics)
-                    .help("下次启动沿用当前选择。读取 Music 本地歌词时间轴。")
+                    .help("下次启动沿用当前选择。支持逐词、逐句和静态的 Music 本地歌词。")
                 if settings.followMusicLyrics {
                     Picker("高亮方式", selection: $settings.karaoke) {
                         Text("逐句").tag(false)
@@ -250,6 +251,12 @@ private struct LyricsSourcesView: View {
                             .disabled(!store.canImportLyrics)
                     }
                 }
+            }
+            Section("歌词时间校准") {
+                LabeledContent("当前歌曲", value: store.hasTrack ? store.title : "尚未播放")
+                    .lineLimit(1)
+                TimingCalibrationControls()
+                Text(store.calibrationDescription).font(.caption).foregroundStyle(.secondary)
             }
             LyricsCredentialSection()
         }

@@ -27,6 +27,7 @@ struct MusicState {
     var running = false       // Music 是否在运行
     var playing = false       // 是否正在播放（false = 暂停/停止）
     var trackID = ""          // 曲目唯一标识（title|artist|album）
+    var playbackToken = ""    // Music 内部曲目标识，用于拒绝切歌期间的过期封面。
     var title = ""
     var artist = ""
     var album = ""
@@ -41,6 +42,24 @@ struct MusicState {
     /// AppleScript 执行失败时的诊断信息；非空表示本轮状态不可靠，
     /// 调用方应展示该信息而非「未运行/未在播放」之类的臆断状态
     var scriptError: String? = nil
+    var scriptErrorCode: Int? = nil
+    var readPending = false // 启动、切歌或短时超时；不把瞬时未就绪当成连接失败。
+}
+
+struct MusicReadRecovery {
+    struct Decision {
+        var showError: Bool
+        var retryDelay: TimeInterval
+    }
+    private var firstFailure: TimeInterval?
+    private var failures = 0
+    mutating func failed(code: Int, at now: TimeInterval) -> Decision {
+        if firstFailure == nil { firstFailure = now }
+        failures += 1
+        return Decision(showError: code == -1743 || now - (firstFailure ?? now) >= 6,
+                        retryDelay: min(4, 0.4 * pow(2, Double(min(failures - 1, 4)))))
+    }
+    mutating func recovered() { firstFailure = nil; failures = 0 }
 }
 
 /// 轻量读取进度；歌曲元数据与下一首仅在切歌时读取，封面另队列按需读取。
@@ -57,7 +76,7 @@ final class MusicMonitor {
             try
                 set trackToken to persistent ID of current track as text
             end try
-            if trackToken is "" then
+            if trackToken is "" or trackToken is "missing value" or trackToken is "0" or trackToken is "0000000000000000" then
                 set t to current track
                 set trackToken to (name of t as text) & "|" & (artist of t as text) & "|" & (album of t as text)
             end if
@@ -83,7 +102,7 @@ final class MusicMonitor {
                 try
                     set trackToken to persistent ID of t as text
                 end try
-                if trackToken is "" then set trackToken to nm & "|" & ar & "|" & al
+                if trackToken is "" or trackToken is "missing value" or trackToken is "0" or trackToken is "0000000000000000" then set trackToken to nm & "|" & ar & "|" & al
                 set nextNm to ""
                 set nextAr to ""
                 set nextAl to ""
@@ -140,9 +159,10 @@ final class MusicMonitor {
     private var eventPoll: DispatchWorkItem?
     private var lastPoll = -Double.infinity
     private var nextAllowedPoll: TimeInterval = 0
-    private var failures = 0
+    private var recovery = MusicReadRecovery()
     private var automaticLyrics: Bool
     private var metadataToken = ""
+    private var artworkGeneration = UUID()
     private var cachedState = MusicState()
     private var embeddedRequestedFor = ""
     private var hasSnapshot = false
@@ -180,6 +200,13 @@ final class MusicMonitor {
             metadataToken = "" // 下次读取时重新生成符合当前模式的元数据。
         }
     }
+    func retry() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            recovery.recovered(); nextAllowedPoll = 0
+            poll(force: true)
+        }
+    }
 
     private func requestPoll() {
         queue.async { [weak self] in
@@ -199,46 +226,54 @@ final class MusicMonitor {
         lastPoll = now
         let (readResult, error) = Self.runScript(Self.stateScriptSource)
         guard let result = readResult, error == nil else {
-            failures += 1
-            nextAllowedPoll = ProcessInfo.processInfo.systemUptime + min(8, pow(2, Double(min(failures, 3))))
-            var state = cachedState
             let number = error?[NSAppleScript.errorNumber] as? Int ?? 0
-            state.scriptError = "无法读取 Music 播放进度 (\(number))"
-            onUpdate(state)
+            reportReadFailure(code: number, detail: "无法读取 Music 播放进度")
             return
         }
-        failures = 0; nextAllowedPoll = 0
         if let value = result.stringValue, ["NOT_RUNNING", "STOPPED"].contains(value) {
+            recovery.recovered(); nextAllowedPoll = 0
             cachedState = MusicState(); cachedState.running = value == "STOPPED"
             metadataToken = ""; embeddedRequestedFor = ""; hasSnapshot = false
+            artworkGeneration = UUID()
             onUpdate(cachedState); return
         }
         let token = Self.text(result, 1)
-        guard !token.isEmpty else { return }
+        guard !token.isEmpty else {
+            reportReadFailure(code: -1728, detail: "Music 的当前歌曲尚未就绪"); return
+        }
         var state = cachedState
-        if metadataToken != token {
+        let metadataChanged = metadataToken != token
+        if metadataChanged {
             let (metadataResult, metadataError) = Self.runScript(Self.metadataScriptSource(includeNext: automaticLyrics))
             guard let metadata = metadataResult, metadataError == nil,
                   Self.text(metadata, 9) == token else {
-                if let metadataError {
-                    failures += 1
-                    nextAllowedPoll = ProcessInfo.processInfo.systemUptime + min(8, pow(2, Double(min(failures, 3))))
-                    var failed = cachedState
-                    failed.scriptError = "无法读取 Music 歌曲信息 (\(metadataError[NSAppleScript.errorNumber] as? Int ?? 0))"
-                    onUpdate(failed)
-                }
+                reportReadFailure(code: metadataError?[NSAppleScript.errorNumber] as? Int ?? -1728,
+                                  detail: "Music 的歌曲信息正在更新")
                 return
             }
             state = MusicState()
             state.title = Self.text(metadata, 1); state.artist = Self.text(metadata, 2); state.album = Self.text(metadata, 3)
             state.duration = metadata.atIndex(4)?.doubleValue ?? 0
+            guard !state.title.isEmpty else {
+                reportReadFailure(code: -1728, detail: "Music 的歌曲信息尚未就绪"); return
+            }
             state.trackID = state.title.isEmpty ? "" : "\(state.title)|\(state.artist)|\(state.album)"
+            state.playbackToken = token
+            if cachedState.playbackToken == token, cachedState.trackID == state.trackID {
+                state.artworkData = cachedState.artworkData
+                state.embeddedLyrics = cachedState.embeddedLyrics
+            }
             if !Self.text(metadata, 5).isEmpty {
                 state.next = NextTrack(title: Self.text(metadata, 5), artist: Self.text(metadata, 6), album: Self.text(metadata, 7),
                                        duration: metadata.atIndex(8)?.doubleValue ?? 0)
             }
-            metadataToken = token; embeddedRequestedFor = ""
-            scheduleArtwork(for: state.trackID, token: token)
+            // Music 刚开始播放时偶尔先返回 0 时长；下一轮补读，不能永久缓存这个空值。
+            metadataToken = state.duration > 0 ? token : ""
+            embeddedRequestedFor = ""
+            if metadataToken == token, cachedState.playbackToken != token || state.artworkData == nil {
+                artworkGeneration = UUID()
+                scheduleArtwork(for: state.trackID, token: token, generation: artworkGeneration)
+            }
         }
         state.running = true; state.playing = Self.text(result, 3) == "playing"
         state.position = result.atIndex(2)?.doubleValue ?? 0
@@ -248,8 +283,22 @@ final class MusicMonitor {
         state.sampledAtUptime = Self.sampleTime(start: start, end: end, received: received)
         state.polledAt = Date().addingTimeInterval((state.sampledAtUptime ?? received) - received)
         state.scriptError = nil
-        state.resetPlaybackClock = force
+        state.scriptErrorCode = nil; state.readPending = false
+        state.resetPlaybackClock = force || metadataChanged
+        recovery.recovered(); nextAllowedPoll = 0
         cachedState = state; hasSnapshot = true
+        onUpdate(state)
+    }
+
+    private func reportReadFailure(code: Int, detail: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let decision = recovery.failed(code: code, at: now)
+        nextAllowedPoll = now + decision.retryDelay
+        var state = cachedState
+        state.resetPlaybackClock = false
+        state.readPending = !decision.showError
+        state.scriptError = decision.showError ? "\(detail) (\(code))" : nil
+        state.scriptErrorCode = decision.showError ? code : nil
         onUpdate(state)
     }
 
@@ -265,40 +314,50 @@ final class MusicMonitor {
         return value.stringValue ?? ""
     }
 
-    private func scheduleArtwork(for trackID: String, token: String) {
-        // 给切歌后的歌词界面留出时间；不反复重试缺失的封面。
-        queue.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self, metadataToken == token else { return }
+    private func scheduleArtwork(for trackID: String, token: String, generation: UUID,
+                                 attempt: Int = 1, delay: TimeInterval = 0.6) {
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, metadataToken == token, artworkGeneration == generation else { return }
             extrasQueue.async { [weak self] in
-                guard let self, queue.sync(execute: { self.metadataToken == token && self.cachedState.trackID == trackID }) else { return }
+                guard let self, queue.sync(execute: {
+                    self.metadataToken == token && self.artworkGeneration == generation && self.cachedState.trackID == trackID
+                }) else { return }
                 let (result, error) = Self.runScript(MusicArtwork.scriptSource)
-                guard error == nil, let result,
-                      (1...3).map({ Self.text(result, $0) }).joined(separator: "|") == trackID else { return }
-                let data = result.atIndex(4).flatMap { $0.descriptorType == typeNull ? nil : MusicArtwork.thumbnailData(from: $0.data) }
+                let valid = error == nil && result.map { MusicArtwork.isCurrentResponse($0, trackID: trackID, token: token) } == true
+                let data = valid ? result?.atIndex(4).flatMap {
+                    $0.descriptorType == typeNull ? nil : MusicArtwork.thumbnailData(from: $0.data)
+                } : nil
                 queue.async { [weak self] in
-                    guard let self, metadataToken == token, cachedState.trackID == trackID, hasSnapshot else { return }
-                    cachedState.artworkData = data
-                    var update = cachedState; update.resetPlaybackClock = false
-                    onUpdate(update)
+                    guard let self, metadataToken == token, artworkGeneration == generation,
+                          cachedState.playbackToken == token, cachedState.trackID == trackID, hasSnapshot else { return }
+                    if let data, cachedState.artworkData != data {
+                        cachedState.artworkData = data
+                        var update = cachedState; update.resetPlaybackClock = false
+                        onUpdate(update)
+                    }
+                    // 同一首歌的暂时空响应保留已经核对过的封面；切歌时旧图已随新快照清空。
+                    if let nextDelay = MusicArtwork.refreshDelay(afterAttempt: attempt, receivedImage: data != nil) {
+                        scheduleArtwork(for: trackID, token: token, generation: generation, attempt: attempt + 1, delay: nextDelay)
+                    }
                 }
             }
         }
     }
 
-    /// 仅在自动匹配未找到歌词时，按曲目请求一次内嵌歌词；Music 词源不需要此项。
+    /// 每首歌只请求一次静态内嵌歌词；Music 缓存暂缺时也可使用，不操作歌词窗口。
     func requestEmbeddedLyrics(for trackID: String) {
         queue.async { [weak self] in
-            guard let self, automaticLyrics, cachedState.trackID == trackID,
+            guard let self, cachedState.trackID == trackID,
                   embeddedRequestedFor != trackID else { return }
             embeddedRequestedFor = trackID
             extrasQueue.async { [weak self] in
-                guard let self, queue.sync(execute: { self.automaticLyrics && self.cachedState.trackID == trackID }) else { return }
+                guard let self, queue.sync(execute: { self.cachedState.trackID == trackID }) else { return }
                 let (result, error) = Self.runScript(MusicArtwork.embeddedLyricsScriptSource)
                 guard error == nil, let result,
                       (1...3).map({ Self.text(result, $0) }).joined(separator: "|") == trackID else { return }
                 let lyricText = Self.text(result, 4).trimmingCharacters(in: .whitespacesAndNewlines)
                 queue.async { [weak self] in
-                    guard let self, automaticLyrics, cachedState.trackID == trackID, hasSnapshot else { return }
+                    guard let self, cachedState.trackID == trackID, hasSnapshot else { return }
                     cachedState.embeddedLyrics = lyricText.isEmpty ? nil : lyricText
                     var update = cachedState; update.resetPlaybackClock = false
                     onUpdate(update)

@@ -219,7 +219,7 @@ final class StoreTests: XCTestCase {
         store.handle(snapshot("one"))
         XCTAssertEqual(store.timingOffset, 2)
         store.handle(snapshot("two"))
-        XCTAssertEqual(store.timingOffset, 0)
+        XCTAssertEqual(store.timingOffset, 0.20)
         XCTAssertTrue(store.lines.isEmpty)
         store.stop()
     }
@@ -334,7 +334,7 @@ final class StoreTests: XCTestCase {
         let regularHeight = settings.windowHeight
         settings.compact = true
         XCTAssertLessThan(settings.windowHeight, regularHeight - 100)
-        XCTAssertLessThan(settings.minimumWindowHeight, settings.windowHeight)
+        XCTAssertEqual(settings.minimumWindowHeight, settings.windowHeight)
         settings.appearance = .transparent
         XCTAssertTrue(settings.isTransparent)
         XCTAssertEqual(settings.appearance.colorScheme, .dark)

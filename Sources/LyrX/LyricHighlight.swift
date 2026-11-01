@@ -1,5 +1,13 @@
 import Foundation
 
+/// 前奏圆点使用歌词时钟；暂停、拖动和时间校准均与歌词一致。
+enum LyricIntroProgress {
+    static func dot(_ index: Int, at position: Double, end: Double) -> Double {
+        guard (0..<3).contains(index), position.isFinite, end.isFinite, end > 0 else { return 0 }
+        return min(max(position / end * 3 - Double(index), 0), 1)
+    }
+}
+
 /// 保留原始排版；逐词源使用真实词时间，逐句源仅估算句内显示进度。
 struct LyricHighlightPlan {
     struct Glyph: Equatable {
