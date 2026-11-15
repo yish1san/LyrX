@@ -2,14 +2,14 @@
 # 构建 LyrX，每次创建独立发布文件夹，App 名称保持 LyrX.app。
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="1.0.8"
-BUILD_NUMBER="150"
+VERSION="1.1.0"
+BUILD_NUMBER="160"
 RELEASE_DIR="${1:-releases/LyrX-${VERSION}-$(date +%Y%m%d-%H%M%S)}"
 if [[ -e "$RELEASE_DIR" ]]; then
     echo "输出目录已存在，请使用新文件夹：$RELEASE_DIR" >&2
     exit 1
 fi
-swift build -c release --disable-sandbox \
+CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache" swift build --cache-path .build/PackageCache -c release --disable-sandbox \
     -Xswiftc -debug-prefix-map -Xswiftc "$PWD=/LyrX" \
     -Xswiftc -file-prefix-map -Xswiftc "$PWD=/LyrX"
 APP="$RELEASE_DIR/LyrX.app"

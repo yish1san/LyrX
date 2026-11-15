@@ -48,7 +48,7 @@ struct AppleMusicLyricsCache: Sendable {
             ORDER BY time_stamp DESC LIMIT 160
         ), recent_songs AS (
             SELECT entry_ID FROM cfurl_cache_response
-            WHERE request_key LIKE '%/catalog/%/songs/%' AND request_key NOT LIKE '%lyrics%'
+            WHERE (request_key LIKE '%/catalog/%/songs%' OR request_key LIKE '%/catalog/%/albums%' OR request_key LIKE '%/library/songs%') AND request_key NOT LIKE '%lyrics%'
             ORDER BY time_stamp DESC LIMIT 80
         )
         SELECT d.isDataOnFS, d.receiver_data, r.request_key
@@ -100,14 +100,16 @@ struct AppleMusicLyricsCache: Sendable {
             responses.append((root, entry.key))
         }
         let localizedTitle = Self.uniqueLocalizedTitle(in: responses.map(\.root), for: query)
+        let ambiguousArtist = Self.hasAmbiguousArtists(in: responses.map(\.root), for: query)
         let catalogIDs = responses.reduce(into: Set<String>()) {
-            $0.formUnion(Self.matchingCatalogIDs(in: $1.root, for: query, localizedTitle: localizedTitle))
+            $0.formUnion(Self.matchingCatalogIDs(in: $1.root, for: query, localizedTitle: localizedTitle, allowLocalizedArtist: !ambiguousArtist))
         }
         var best: LyricsResult?
+        let verifiedIDs = catalogIDs.union(query.identity?.catalogIDs ?? [])
         for response in responses {
             guard ProcessInfo.processInfo.systemUptime < decodeDeadline else { break }
             if let result = Self.decode(response.root, for: query, languages: Locale.preferredLanguages,
-                                        requestKey: response.key, catalogIDs: catalogIDs, localizedTitle: localizedTitle) {
+                                        requestKey: response.key, catalogIDs: verifiedIDs, localizedTitle: localizedTitle, allowLocalizedArtist: !ambiguousArtist) {
                 if result.isWordSynced { return .lyrics(result) }
                 if best == nil || (best?.isPlain == true && !result.isPlain) { best = result }
             }
@@ -121,12 +123,28 @@ struct AppleMusicLyricsCache: Sendable {
 
     static func decode(_ data: Data, for query: LyricsQuery, languages: [String] = Locale.preferredLanguages) -> LyricsResult? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return decode(root, for: query, languages: languages, requestKey: "", catalogIDs: [],
-                      localizedTitle: uniqueLocalizedTitle(in: [root], for: query))
+        return decode(root, for: query, languages: languages, requestKey: "", catalogIDs: query.identity?.catalogIDs ?? [],
+                      localizedTitle: uniqueLocalizedTitle(in: [root], for: query), allowLocalizedArtist: !hasAmbiguousArtists(in: [root], for: query))
     }
 
+    /// Catalog 响应可能包含专辑 tracks、library 的 catalog 关系，或单个 data 对象。
+    /// 只遍历资源关系，不把任意 JSON 字段当作歌词或歌曲。
     private static func items(in root: [String: Any]) -> [[String: Any]] {
-        (root["data"] as? [[String: Any]] ?? []) + (root["included"] as? [[String: Any]] ?? [])
+        var result: [[String: Any]] = []
+        func append(_ value: Any?, depth: Int) {
+            guard depth < 6, result.count < 1200 else { return }
+            let entries = (value as? [[String: Any]]) ?? (value as? [String: Any]).map { [$0] } ?? []
+            for item in entries.prefix(1200 - result.count) {
+                result.append(item)
+                if let relationships = item["relationships"] as? [String: [String: Any]] {
+                    for key in relationships.keys.sorted() {
+                        append(relationships[key]?["data"], depth: depth + 1)
+                    }
+                }
+            }
+        }
+        append(root["data"], depth: 0); append(root["included"], depth: 0)
+        return result
     }
     private static func titleMatches(_ title: String, _ query: LyricsQuery) -> Bool {
         TextNormalizer.looselyEqual(title, query.track) || TextNormalizer.bilingualAliasMatches(title, query.track)
@@ -144,8 +162,15 @@ struct AppleMusicLyricsCache: Sendable {
               let milliseconds = attributes["durationInMillis"] as? Double,
               query.duration.isFinite, query.duration > 0, milliseconds > 0,
               abs(milliseconds / 1000 - query.duration) <= 3,
-              TextNormalizer.versionsCompatible(title, query.track),
-              TextNormalizer.artistsMatch(artist, query.artist) || TextNormalizer.bilingualAliasMatches(artist, query.artist) else { return false }
+              TextNormalizer.versionsCompatible(title, query.track) else { return false }
+        let artistMatches = TextNormalizer.artistsMatch(artist, query.artist) || TextNormalizer.bilingualAliasMatches(artist, query.artist)
+        if !artistMatches {
+            guard LyricQuality.containsCJK(artist) != LyricQuality.containsCJK(query.artist),
+                  !artist.isEmpty, !query.artist.isEmpty, titleMatches(title, query),
+                  let album = attributes["albumName"] as? String, !query.album.isEmpty,
+                  TextNormalizer.looselyEqual(album, query.album),
+                  abs(milliseconds / 1000 - query.duration) <= 0.75 else { return false }
+        }
         if titleMatches(title, query) { return true }
         // 仅在艺人、专辑及精确时长同时吻合时，允许中英文标题本地化差异。
         guard LyricQuality.containsCJK(title) != LyricQuality.containsCJK(query.track),
@@ -154,9 +179,23 @@ struct AppleMusicLyricsCache: Sendable {
               abs(milliseconds / 1000 - query.duration) <= 0.75 else { return false }
         return true
     }
-    private static func matchingCatalogIDs(in root: [String: Any], for query: LyricsQuery, localizedTitle: String?) -> Set<String> {
-        Set(items(in: root).compactMap { item in
+    private static func hasAmbiguousArtists(in roots: [[String: Any]], for query: LyricsQuery) -> Bool {
+        let artists = Set(roots.flatMap { items(in: $0) }.compactMap { item -> String? in
             guard let attributes = item["attributes"] as? [String: Any], identityMatches(attributes, query: query),
+                  let artist = attributes["artistName"] as? String else { return nil }
+            return TextNormalizer.canonical(artist)
+        })
+        return artists.count > 1
+    }
+    private static func allowedIdentity(_ attributes: [String: Any], query: LyricsQuery, allowLocalizedArtist: Bool) -> Bool {
+        guard identityMatches(attributes, query: query) else { return false }
+        guard !allowLocalizedArtist else { return true }
+        let artist = attributes["artistName"] as? String ?? ""
+        return TextNormalizer.artistsMatch(artist, query.artist) || TextNormalizer.bilingualAliasMatches(artist, query.artist)
+    }
+    private static func matchingCatalogIDs(in root: [String: Any], for query: LyricsQuery, localizedTitle: String?, allowLocalizedArtist: Bool) -> Set<String> {
+        Set(items(in: root).compactMap { item in
+            guard let attributes = item["attributes"] as? [String: Any], allowedIdentity(attributes, query: query, allowLocalizedArtist: allowLocalizedArtist),
                   let title = attributes["name"] as? String,
                   titleMatches(title, query) || TextNormalizer.canonical(title) == localizedTitle,
                   let id = item["id"] as? String, !id.isEmpty else { return nil }
@@ -164,16 +203,33 @@ struct AppleMusicLyricsCache: Sendable {
         })
     }
     private static func decode(_ root: [String: Any], for query: LyricsQuery, languages: [String],
-                               requestKey: String, catalogIDs: Set<String>, localizedTitle: String?) -> LyricsResult? {
+                               requestKey: String, catalogIDs: Set<String>, localizedTitle: String?, allowLocalizedArtist: Bool) -> LyricsResult? {
         var lyricEntries: [[String: Any]] = []
-        for song in items(in: root) {
-            guard let attributes = song["attributes"] as? [String: Any], identityMatches(attributes, query: query),
-                  let title = attributes["name"] as? String,
-                  titleMatches(title, query) || TextNormalizer.canonical(title) == localizedTitle else { continue }
+        let resources = items(in: root)
+        let matchingIDs = catalogIDs.union(matchingCatalogIDs(in: root, for: query, localizedTitle: localizedTitle,
+                                                               allowLocalizedArtist: allowLocalizedArtist))
+        for song in resources {
+            let attributes = song["attributes"] as? [String: Any] ?? [:]
+            let matchedAttributes = allowedIdentity(attributes, query: query, allowLocalizedArtist: allowLocalizedArtist) &&
+                ((attributes["name"] as? String).map { titleMatches($0, query) || TextNormalizer.canonical($0) == localizedTitle } ?? false)
+            let matchedID = (song["id"] as? String).map { id in
+                guard matchingIDs.contains(id) else { return false }
+                if let milliseconds = attributes["durationInMillis"] as? Double {
+                    return abs(milliseconds / 1000 - query.duration) <= 3
+                }
+                return true
+            } ?? false
+            guard matchedAttributes || matchedID else { continue }
             let relationships = song["relationships"] as? [String: Any] ?? [:]
             for key in ["syllable-lyrics", "lyrics"] {
                 let relationship = relationships[key] as? [String: Any]
-                lyricEntries += relationship?["data"] as? [[String: Any]] ?? []
+                let linked = relationship?["data"] as? [[String: Any]] ?? []
+                for reference in linked {
+                    if reference["attributes"] != nil { lyricEntries.append(reference) }
+                    else if let id = reference["id"] as? String, let type = reference["type"] as? String {
+                        lyricEntries += resources.filter { ($0["id"] as? String) == id && ($0["type"] as? String) == type && $0["attributes"] != nil }
+                    }
+                }
             }
             // 一些缓存响应把 TTML 放在歌曲属性中。
             if attributes["ttmlLocalizations"] != nil || attributes["ttml"] != nil { lyricEntries.append(song) }
@@ -182,7 +238,7 @@ struct AppleMusicLyricsCache: Sendable {
         if let path = URLComponents(string: requestKey)?.percentEncodedPath.removingPercentEncoding,
            let range = path.range(of: #"/songs/([^/]+)/(?:syllable-lyrics|lyrics)/?$"#, options: .regularExpression) {
             let parts = path[range].split(separator: "/")
-            if parts.count >= 3, catalogIDs.contains(String(parts[1])) {
+            if parts.count >= 3, matchingIDs.contains(String(parts[1])) {
                 lyricEntries += root["data"] as? [[String: Any]] ?? []
             }
         }
@@ -236,6 +292,7 @@ struct AppleMusicLyricsCache: Sendable {
             }
             return [string]
         }
+        if let array = value as? [Any] { return array.prefix(8).flatMap { lyricCandidates($0, languages: languages, depth: depth + 1) } }
         guard let entries = value as? [String: Any], !entries.isEmpty else { return [] }
         for field in ["ttml", "text"] where entries[field] != nil {
             return lyricCandidates(entries[field]!, languages: languages, depth: depth + 1)

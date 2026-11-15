@@ -8,14 +8,16 @@ final class TrackPreferences {
     struct Entry: Codable {
         var offset: Double = TrackPreferences.defaultTimingOffset
         var lyrics: LyricsResult?
+        var source: TrackLyricsSource = .followDefault
         var musicOffset: Double?
 
         init(offset: Double = TrackPreferences.defaultTimingOffset, lyrics: LyricsResult? = nil, musicOffset: Double? = nil) {
             self.offset = offset; self.lyrics = lyrics; self.musicOffset = musicOffset
         }
-        private enum CodingKeys: String, CodingKey { case offset, lyrics, musicOffset }
+        private enum CodingKeys: String, CodingKey { case offset, lyrics, musicOffset, source }
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            source = (try? values.decode(TrackLyricsSource.self, forKey: .source)) ?? .followDefault
             offset = try values.decodeIfPresent(Double.self, forKey: .offset) ?? TrackPreferences.defaultTimingOffset
             lyrics = try values.decodeIfPresent(LyricsResult.self, forKey: .lyrics)
             musicOffset = try values.decodeIfPresent(Double.self, forKey: .musicOffset)

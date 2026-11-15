@@ -118,7 +118,7 @@ final class LyricDrawingView: NSView {
         paragraph.alignment = centered ? .center : .left
         paragraph.lineBreakMode = .byWordWrapping
         container.containerSize = CGSize(width: width, height: 10_000)
-        container.maximumNumberOfLines = compact ? 1 : 3
+        container.maximumNumberOfLines = compact ? 1 : 0
         container.lineBreakMode = .byTruncatingTail
         storage.setAttributedString(NSAttributedString(string: text, attributes: [
             .font: drawingFont, .foregroundColor: base.withAlphaComponent(0.42), .paragraphStyle: paragraph

@@ -16,6 +16,9 @@ final class OverlaySettings: ObservableObject {
     private let defaults: UserDefaults
     private let temporary: Bool
     @Published var visibleLines: Int { didSet { save(visibleLines, "visibleLines"); onLayoutChange?() } }
+    @Published var compactLines: Int { didSet { save(compactLines, "compactLines"); onLayoutChange?() } }
+    @Published var automaticSourceFallback: Bool { didSet { save(automaticSourceFallback, "automaticSourceFallback"); onLyricsSourceChange?() } }
+    @Published var autoFitWidth: Bool { didSet { save(autoFitWidth, "autoFitWidth"); onLayoutChange?() } }
     @Published var fontSize: Double { didSet { save(fontSize, "fontSize"); onLayoutChange?() } }
     @Published var fontStyle: LyricFontStyle { didSet { save(fontStyle.rawValue, "fontStyle"); onLayoutChange?() } }
     @Published var customFontName: String { didSet { save(customFontName, "customFontName"); onLayoutChange?() } }
@@ -39,6 +42,7 @@ final class OverlaySettings: ObservableObject {
     var onLayoutChange: (() -> Void)?
     var onBehaviorChange: (() -> Void)?
     var onLyricsSourceChange: (() -> Void)?
+    var onResetSize: (() -> Void)?
     var onShortcutChange: (() -> Void)?
     static let minLines = 3
     static let maxLines = 7
@@ -56,6 +60,9 @@ final class OverlaySettings: ObservableObject {
             return defaults.object(forKey: "overlay.\(key)") as? Bool ?? fallback
         }
         visibleLines = Int(min(max(number("visibleLines", 5), Double(Self.minLines)), Double(Self.maxLines)))
+        compactLines = Int(min(max(number("compactLines", 2), 1), 7))
+        automaticSourceFallback = flag("automaticSourceFallback", false)
+        autoFitWidth = flag("autoFitWidth", true)
         fontSize = min(max(number("fontSize", 20), 14), 28)
         fontStyle = temporary ? .system : (LyricFontStyle(rawValue: defaults.string(forKey: "overlay.fontStyle") ?? "") ?? .system)
         customFontName = temporary ? "" : defaults.string(forKey: "overlay.customFontName") ?? ""
@@ -80,13 +87,13 @@ final class OverlaySettings: ObservableObject {
 
     var rowHeight: CGFloat { CGFloat(fontSize) * 1.55 + 8 }
     var isTransparent: Bool { appearance == .transparent }
-    var minimumWindowHeight: CGFloat { compact ? rowHeight * 2 + 16 : max(220, rowHeight * 2 + 122) }
+    var minimumWindowHeight: CGFloat { compact ? rowHeight * CGFloat(compactLines) + 16 : max(220, rowHeight * 2 + 122) }
     var minimumWindowSize: NSSize { NSSize(width: 380, height: minimumWindowHeight) }
-    var windowHeight: CGFloat { max(minimumWindowHeight, compact ? rowHeight * 2 + 16 : rowHeight * CGFloat(visibleLines) + 122) }
+    var windowHeight: CGFloat { max(minimumWindowHeight, compact ? rowHeight * CGFloat(compactLines) + 16 : rowHeight * CGFloat(visibleLines) + 122) }
     private func save(_ value: Any, _ key: String) { if !temporary { defaults.set(value, forKey: "overlay.\(key)") } }
 
     func resetAppearance() {
-        visibleLines = 5; fontSize = 20; backgroundOpacity = 0.62
+        visibleLines = 5; compactLines = 2; fontSize = 20; backgroundOpacity = 0.62
         fontStyle = .system; customFontName = ""
         appearance = .system; accent = .primary; centered = true; compact = false; karaoke = true
         lyricColorChoice = .primary; lyricColorHex = "FFFFFF"; highlightColorHex = "FFFFFF"; highlightStyle = .music
@@ -142,11 +149,14 @@ struct SettingsView: View {
                             }
                             Slider(value: $settings.backgroundOpacity, in: 0...1).accessibilityLabel("背景浓度")
                         }.accessibilityElement(children: .contain).disabled(settings.isTransparent)
-                        Stepper("显示 \(settings.visibleLines) 行", value: $settings.visibleLines, in: 3...7)
-                            .disabled(settings.compact)
+                        if settings.compact {
+                            Stepper("显示 \(settings.compactLines) 行", value: $settings.compactLines, in: 1...7)
+                        } else {
+                            Stepper("显示 \(settings.visibleLines) 行", value: $settings.visibleLines, in: 3...7)
+                        }
                         Toggle("歌词居中", isOn: $settings.centered)
                         Toggle("精简模式 · 只显示歌词", isOn: $settings.compact)
-                            .help("仅显示两行歌词，可直接拖动；从菜单栏恢复完整模式。")
+                            .help("只显示歌词，可选择 1–7 行；奇数行时当前句保持居中。")
                     }
                     Button("恢复默认外观") { settings.resetAppearance() }
                 }
@@ -157,6 +167,9 @@ struct SettingsView: View {
             Form {
                 LoginItemSection()
                 Section("悬浮窗") {
+                    Toggle("根据歌词自动扩展宽度", isOn: $settings.autoFitWidth)
+                        .help("按整首歌词调整一次，不超过屏幕和窗口上限；更长的歌词在行内滚动。")
+                    Button("重置窗口大小") { settings.onResetSize?() }
                     Toggle("保持在其他窗口上方", isOn: $settings.floating)
                     Toggle("在所有桌面显示", isOn: $settings.allSpaces)
                     Toggle("暂停或停止时自动隐藏", isOn: $settings.hideWhenPaused)
@@ -218,8 +231,18 @@ private struct LyricsSourcesView: View {
             Section("歌词来源") {
                 LabeledContent("当前词源", value: store.currentSourceTitle)
                 Toggle("同步 Apple Music 歌词", isOn: $settings.followMusicLyrics)
-                    .help("下次启动沿用当前选择。支持逐词、逐句和静态的 Music 本地歌词。")
-                if settings.followMusicLyrics {
+                    .help("下次启动沿用当前选择。支持逐词、逐句和静态的 Music 本地歌词；名称不一致时查询 Apple 公开歌曲目录确认身份。")
+                Toggle("自动匹配词源", isOn: $settings.automaticSourceFallback)
+                    .help("优先使用 Music；无可用歌词、读取失败或只有静态歌词时，自动寻找其他词源。手动指定的单曲词源不自动切换。")
+                if settings.automaticSourceFallback {
+                    Text("回退时会向已启用的歌词服务查询歌名、歌手和专辑。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("本首歌曲词源", selection: Binding(get: { store.selectedTrackSource }, set: { store.setTrackSource($0) })) {
+                    ForEach(TrackLyricsSource.allCases) { Text($0.title).tag($0) }
+                }.disabled(!store.hasTrack)
+                Text(store.sourceSelectionHint).font(.caption).foregroundStyle(.secondary)
+                if store.appleMusicSyncEnabled {
                     Picker("高亮方式", selection: $settings.karaoke) {
                         Text("逐句").tag(false)
                         Text("逐字").tag(true)
@@ -229,7 +252,7 @@ private struct LyricsSourcesView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            if settings.followMusicLyrics {
+            if store.appleMusicSyncEnabled {
                 Section("本地歌词") {
                     if !store.musicCacheHint.isEmpty {
                         Text(store.musicCacheHint).font(.caption).foregroundStyle(.secondary)

@@ -152,3 +152,72 @@ final class AppleMusicCacheStoreTests: XCTestCase {
         store.stop()
     }
 }
+
+final class LocalizedMusicCacheTests: XCTestCase {
+    private let xml = "<tt><body><div><p begin=\"1s\" end=\"4s\">缓存兼容测试</p></div></body></tt>"
+    private func song(title: String, artist: String, album: String, id: String = "song-1", duration: Int = 240_000) -> [String: Any] {
+        ["id": id, "type": "songs", "attributes": ["name": title, "artistName": artist, "albumName": album, "durationInMillis": duration],
+         "relationships": ["lyrics": ["data": [["id": "lyric-1", "type": "lyrics", "attributes": ["ttml": xml]]]]]]
+    }
+    private func decode(_ root: [String: Any], query: LyricsQuery) throws -> LyricsResult? {
+        AppleMusicLyricsCache.decode(try JSONSerialization.data(withJSONObject: root), for: query)
+    }
+    func testLocalizedArtistRequiresMatchingTitleAlbumAndExactDuration() throws {
+        for (title, cachedArtist, queriedArtist, album) in [("爱错", "王力宏", "Leehom Wang", "心中的日月"),
+                                                           ("走走", "李榮浩", "Ronghao Li", "黑馬"),
+                                                           ("Payphone", "Maroon 5", "魔力红乐队", "Overexposed")] {
+            let query = LyricsQuery(track: title, artist: queriedArtist, album: album, duration: 240)
+            XCTAssertNotNil(try decode(["data": [song(title: title, artist: cachedArtist, album: album)]], query: query))
+            XCTAssertNil(try decode(["data": [song(title: title, artist: cachedArtist, album: "Other Album")]], query: query))
+            XCTAssertNil(try decode(["data": [song(title: title, artist: cachedArtist, album: album, duration: 242_000)]], query: query))
+            XCTAssertNil(try decode(["data": [song(title: title + " (Live)", artist: cachedArtist, album: album)]], query: query))
+        }
+    }
+    func testAmbiguousLocalizedArtistsAreRejected() throws {
+        let query = LyricsQuery(track: "Payphone", artist: "魔力红乐队", album: "Overexposed", duration: 240)
+        let root: [String: Any] = ["data": [song(title: "Payphone", artist: "Maroon 5", album: "Overexposed"),
+                                                  song(title: "Payphone", artist: "Another Band", album: "Overexposed", id: "song-2")]]
+        XCTAssertNil(try decode(root, query: query))
+    }
+    func testAlbumTracksAndLibraryCatalogRelationshipsAreTraversed() throws {
+        let query = LyricsQuery(track: "愛錯", artist: "王力宏", album: "心中的日月", duration: 240)
+        let resource = song(title: "爱错", artist: "王力宏", album: "心中的日月")
+        for relationship in ["tracks", "catalog"] {
+            let root: [String: Any] = ["data": ["id": "parent", "relationships": [relationship: ["data": [resource]]]]]
+            XCTAssertEqual(try decode(root, query: query)?.lines.first?.text, "缓存兼容测试")
+        }
+    }
+    func testIncludedLyricsReferencesResolveWithoutReadingUnrelatedLyrics() throws {
+        let query = LyricsQuery(track: "Payphone", artist: "Maroon 5", album: "Overexposed", duration: 240)
+        var resource = song(title: query.track, artist: query.artist, album: query.album)
+        resource["relationships"] = ["lyrics": ["data": [["id": "chosen", "type": "lyrics"]]]]
+        let included: [[String: Any]] = [
+            ["id": "other", "type": "lyrics", "attributes": ["ttml": "<tt><body><p>wrong</p></body></tt>"]],
+            ["id": "chosen", "type": "lyrics", "attributes": ["ttmlLocalizations": [["ttml": xml]]]]]
+        XCTAssertEqual(try decode(["data": [resource], "included": included], query: query)?.lines.first?.text, "缓存兼容测试")
+        resource["relationships"] = ["lyrics": ["data": [["id": "missing", "type": "lyrics"]]]]
+        XCTAssertNil(try decode(["data": [resource], "included": included], query: query))
+    }
+    func testNestedAlbumMetadataBindsStandaloneLyricsByCatalogID() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("Cache.db").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TABLE cfurl_cache_response(entry_ID INTEGER, request_key TEXT, time_stamp REAL); CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER, isDataOnFS INTEGER, receiver_data BLOB);", nil, nil, nil), SQLITE_OK)
+        var metadata = song(title: "Payphone", artist: "Maroon 5", album: "Overexposed", id: "123")
+        metadata.removeValue(forKey: "relationships")
+        let rows: [(String, [String: Any])] = [
+            ("https://example.invalid/v1/catalog/us/albums/456?include=tracks", ["data": [["relationships": ["tracks": ["data": [metadata]]]]]]),
+            ("https://example.invalid/v1/catalog/us/songs/123/lyrics", ["data": [["attributes": ["ttml": xml]]]])]
+        for (i, row) in rows.enumerated() {
+            let bytes = try JSONSerialization.data(withJSONObject: row.1).map { String(format: "%02x", $0) }.joined()
+            XCTAssertEqual(sqlite3_exec(db, "INSERT INTO cfurl_cache_response VALUES(\(i), '\(row.0)', \(i)); INSERT INTO cfurl_cache_receiver_data VALUES(\(i), 0, X'\(bytes)');", nil, nil, nil), SQLITE_OK)
+        }
+        let query = LyricsQuery(track: "Payphone", artist: "魔力红乐队", album: "Overexposed", duration: 240)
+        if case .lyrics(let result) = AppleMusicLyricsCache().lookup(query, directory: directory) {
+            XCTAssertEqual(result.lines.first?.text, "缓存兼容测试")
+        } else { XCTFail("Nested catalog metadata must identify the standalone lyric response") }
+    }
+}

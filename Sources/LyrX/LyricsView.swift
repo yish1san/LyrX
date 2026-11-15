@@ -79,7 +79,12 @@ private struct LyricRow: View {
     let transparent: Bool
     var body: some View {
         Group {
-            if current && karaoke {
+            if compact {
+                CompactLyricText(line: line, end: end, clock: clock, playing: playing,
+                                 font: font, baseColor: baseColor, accent: accent,
+                                 style: highlightStyle, karaoke: current && karaoke,
+                                 current: current, centered: centered)
+            } else if current && karaoke {
                 ProgressLyricText(plan: LyricHighlightPlan(line: line, end: end),
                                   clock: clock, playing: playing, font: font, baseColor: baseColor,
                                   accent: accent, style: highlightStyle, centered: centered, compact: compact)
@@ -89,7 +94,7 @@ private struct LyricRow: View {
         }
         .font(Font(font))
         .multilineTextAlignment(centered ? .center : .leading)
-        .lineLimit(compact ? 1 : 3)
+        .lineLimit(compact ? 1 : nil)
         .minimumScaleFactor(compact ? 0.65 : 1)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
@@ -310,24 +315,40 @@ struct LyricsView: View {
         } else if store.synced && !store.lines.isEmpty { compactLyrics }
         else if let plain = store.plainLyrics {
             Text(plain).font(Font(settings.nativeFont())).foregroundStyle(settings.lyricColor)
-                .multilineTextAlignment(settings.centered ? .center : .leading).lineLimit(2)
+                .multilineTextAlignment(settings.centered ? .center : .leading).lineLimit(settings.compactLines)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: settings.centered ? .center : .leading)
                 .padding(.horizontal, 24)
         } else {
-            Text(store.connecting && !store.hasTrack ? "正在连接 Apple Music…" : store.appleMusicSyncEnabled && store.hasTrack ? store.musicEmptyTitle : store.phase == .loading ? "正在匹配歌词…" : store.phase == .notFound ? "未找到歌词" : store.phase == .failed ? "歌词获取失败" : "播放音乐后显示歌词")
+            Text(store.connecting && !store.hasTrack ? "正在连接 Apple Music…" : store.appleMusicSyncEnabled && !store.fallbackActive && store.hasTrack ? store.musicEmptyTitle : store.phase == .loading ? "正在匹配歌词…" : store.phase == .notFound ? "未找到歌词" : store.phase == .failed ? "歌词获取失败" : "播放音乐后显示歌词")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
     private var compactLyrics: some View {
-        VStack(spacing: 10) {
-            if store.currentIndex < 0 { intro }
-            else { row(store.lines[store.currentIndex], at: store.currentIndex) }
-            let next = store.currentIndex + 1
-            if next < store.lines.count { row(store.lines[next], at: next) }
+        GeometryReader { geometry in
+            let count = settings.compactLines
+            let rowHeight = geometry.size.height / CGFloat(count)
+            let focus = LyricViewport.focusedRow(lines: count)
+            let current = max(-1, store.currentIndex)
+            let lower = max(-1, current - focus - 1)
+            let upper = min(store.lines.count - 1, current + count - focus)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(lower...max(lower, upper)), id: \.self) { index in
+                    Group {
+                        if index == -1 { intro }
+                        else if store.lines.indices.contains(index) { row(store.lines[index], at: index) }
+                    }
+                    .frame(height: rowHeight)
+                    .frame(maxWidth: .infinity)
+                    .offset(y: CGFloat(index - current + focus) * rowHeight)
+                    .transition(.identity)
+                }
+            }
+            .padding(.horizontal, 24)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: store.currentIndex)
         }
-        .padding(.horizontal, 24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
     private var intro: some View {
         IntroCountdown(clock: store.clock, end: store.lines.first?.time ?? 0,
@@ -399,7 +420,7 @@ struct LyricsView: View {
             Text(emptyTitle).font(.system(size: 14, weight: .medium))
             Text(emptyDescription).font(.system(size: 11)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).lineLimit(3)
-            if store.appleMusicSyncEnabled && store.hasTrack {
+            if store.appleMusicSyncEnabled && !store.fallbackActive && store.hasTrack {
                 Button("同步设置…") { actions.settings() }.controlSize(.small)
             } else if store.phase == .failed || store.phase == .notFound {
                 HStack {
@@ -413,14 +434,14 @@ struct LyricsView: View {
         }.padding(18).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var emptyIcon: String {
-        if store.appleMusicSyncEnabled && store.hasTrack {
+        if store.appleMusicSyncEnabled && !store.fallbackActive && store.hasTrack {
             return store.musicCacheNeedsAccess ? "lock.doc" : "text.magnifyingglass"
         }
         return store.phase == .failed ? "wifi.exclamationmark" : store.phase == .notFound ? "text.magnifyingglass" : "music.note"
     }
     private var emptyTitle: String {
         if store.connecting && !store.hasTrack { return "正在连接 Apple Music…" }
-        if store.appleMusicSyncEnabled && store.hasTrack {
+        if store.appleMusicSyncEnabled && !store.fallbackActive && store.hasTrack {
             return store.musicEmptyTitle
         }
         return switch store.phase {
@@ -432,7 +453,7 @@ struct LyricsView: View {
     }
     private var emptyDescription: String {
         if store.connecting && !store.hasTrack { return "正在等待 Music 提供当前歌曲。" }
-        if store.appleMusicSyncEnabled && store.hasTrack { return store.musicCacheHint }
+        if store.appleMusicSyncEnabled && !store.fallbackActive && store.hasTrack { return store.musicCacheHint }
         return switch store.phase {
         case .loading: "正在获取歌词…"
         case .failed: store.statusText

@@ -140,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if AppIdentity.isPreview {
             let settings = OverlaySettings(temporary: true)
             settings.followMusicLyrics = CommandLine.arguments.contains("--preview-apple-lines") || CommandLine.arguments.contains("--preview-apple-static")
+            if CommandLine.arguments.contains("--preview-compact-five") { settings.compact = true; settings.compactLines = 5 }
             return settings
         }
         return OverlaySettings()
@@ -183,12 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } else { resetPosition() }
         constrainToScreen()
         panel.delegate = self
-        settings.onLayoutChange = { [weak self] in self?.applyWindowHeight(); self?.applyBehavior() }
+        settings.onLayoutChange = { [weak self] in self?.applyWindowHeight(); self?.applyBehavior(); self?.fitLyricsWidth() }
         settings.onBehaviorChange = { [weak self] in self?.applyBehavior() }
         settings.onLyricsSourceChange = { [weak self] in
             guard let self else { return }
-            store.setAppleMusicSyncEnabled(settings.followMusicLyrics)
+            store.configureSources(preferMusic: settings.followMusicLyrics, automaticFallback: settings.automaticSourceFallback)
         }
+        settings.onResetSize = { [weak self] in self?.resetSize() }
+        store.onLyricsChange = { [weak self] in self?.fitLyricsWidth() }
         store.onPlaybackChange = { [weak self] in self?.updateVisibility() }
         setupMenu()
         settings.onShortcutChange = { [weak self] in self?.updateGlobalShortcut() }
@@ -199,7 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         if preview { wantsVisible = true }
         store.start(preview: preview, appleMusicSync: settings.followMusicLyrics)
-        store.setAppleMusicSyncEnabled(settings.followMusicLyrics)
+        store.configureSources(preferMusic: settings.followMusicLyrics, automaticFallback: settings.automaticSourceFallback)
         applyBehavior()
         if preview, CommandLine.arguments.contains("--preview-smallest-window") {
             panel.setFrame(NSRect(origin: panel.frame.origin, size: NSSize(width: 1, height: 1)), display: true)
@@ -266,10 +269,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func resetPosition() {
         guard let panel, let screen = NSScreen.main else { return }
         let bounds = screen.visibleFrame
-        let width: CGFloat = min(480, bounds.width)
-        let height = min(settings.windowHeight, bounds.height)
-        panel.setFrame(NSRect(x: bounds.midX - width / 2, y: bounds.minY + min(72, max(0, bounds.height - height)),
-                              width: width, height: height), display: true)
+        panel.setFrameOrigin(LyricViewport.resetOrigin(size: panel.frame.size, screen: bounds))
+        saveFrame()
+    }
+
+    private func resetSize() {
+        guard let panel else { return }
+        var frame = panel.frame
+        frame.size = NSSize(width: 480, height: settings.windowHeight)
+        panel.setFrame(frame, display: true)
+        constrainToScreen(); saveFrame()
+    }
+    private func fitLyricsWidth() {
+        guard let panel, settings.autoFitWidth, store.synced, !store.lines.isEmpty else { return }
+        let screen = (panel.screen ?? NSScreen.main)?.visibleFrame ?? panel.frame
+        let width = LyricViewport.requiredWidth(lines: store.lines, font: settings.nativeFont(emphasized: true),
+                                               minimum: panel.frame.width, maximum: min(panel.sizeLimits.maximum.width, screen.width))
+        guard width > panel.frame.width + 1 else { return }
+        var frame = panel.frame
+        frame.origin.x -= (width - frame.width) / 2
+        frame.size.width = width
+        frame.origin.x = min(max(frame.origin.x, screen.minX), screen.maxX - width)
+        panel.setFrame(frame, display: true)
         saveFrame()
     }
 

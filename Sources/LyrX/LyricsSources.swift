@@ -8,6 +8,7 @@ struct LyricsQuery: Sendable {
     var artist: String
     var album: String
     var duration: Double // 秒
+    var identity: SongIdentity? = nil
 }
 
 /// 标准化歌词结果：行级必有，逐词可选；isPlain=true 表示无时间轴的静态歌词

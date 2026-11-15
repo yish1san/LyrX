@@ -172,7 +172,9 @@ final class AppearanceTests: XCTestCase {
         let text = "你好，世界 👋🏽 ffi\nHello music مرحبا"
         let view = drawing(text, width: 230)
         XCTAssertGreaterThan(view.frame.height, drawing("你好").frame.height)
-        XCTAssertLessThan(view.frame.height, 200)
+        // 完整模式允许超过三行，避免窄窗口截断歌词；仍只按实际文字排版。
+        XCTAssertGreaterThan(view.frame.height, drawing(text, width: 600).frame.height)
+        XCTAssertLessThan(view.frame.height, 500)
         view.position = 4
         XCTAssertGreaterThan(redPixels(try snapshot(view)), 10)
         let compact = drawing(text, width: 140, compact: true)

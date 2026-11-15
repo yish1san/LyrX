@@ -115,7 +115,10 @@ enum TextNormalizer {
     static func artistsMatch(_ a: String, _ b: String) -> Bool {
         let x = canonical(a), y = canonical(b)
         guard !x.isEmpty, !y.isEmpty else { return false }
-        if x == y { return true }
+        if x == y || bilingualAliasMatches(a, b) { return true }
+        let ax = a.lowercased().split(separator: " ").map(String.init).sorted()
+        let bx = b.lowercased().split(separator: " ").map(String.init).sorted()
+        if ax.count > 1 && ax == bx { return true }
         func names(_ s: String) -> Set<String> {
             let separated = s.replacingOccurrences(of: #"\s+(?:feat\.?|ft\.?|with)\s+"#, with: "/", options: [.regularExpression, .caseInsensitive])
             return Set(separated.components(separatedBy: CharacterSet(charactersIn: ",，&/、;；")).map(canonical).filter { !$0.isEmpty })
@@ -325,10 +328,15 @@ enum NetEaseLyricsService {
     private struct SearchResponse: Decodable {
         struct Result: Decodable {
             struct Song: Decodable {
-                struct Artist: Decodable { let name: String? }
+                struct Artist: Decodable { let name: String?; let alias: [String]?; let transNames: [String]?
+                    func matches(_ artist: String) -> Bool { ([name].compactMap { $0 } + (alias ?? []) + (transNames ?? [])).contains { TextNormalizer.artistsMatch($0, artist) } }
+                }
                 let id: Int
                 let name: String?
                 let artists: [Artist]?
+                let alias: [String]?
+                let transNames: [String]?
+                func titleMatches(_ title: String) -> Bool { ([name].compactMap { $0 } + (alias ?? []) + (transNames ?? [])).contains { TextNormalizer.looselyEqual($0, title) || TextNormalizer.bilingualAliasMatches($0, title) } }
                 let duration: Int?
                 let dt: Int?
             }
@@ -361,14 +369,14 @@ enum NetEaseLyricsService {
         comps.setQuery([
             URLQueryItem(name: "s", value: "\(track) \(artist)"),
             URLQueryItem(name: "type", value: "1"),
-            URLQueryItem(name: "limit", value: "5")
+            URLQueryItem(name: "limit", value: "20")
         ])
         guard let (data, resp) = try? await httpGet(comps, referer: "https://music.163.com", browserUA: true),
               (200..<300).contains(resp.statusCode),
               let songs = try? JSONDecoder().decode(SearchResponse.self, from: data).result?.songs else { return nil }
         for s in songs {
             guard let rawName = s.name, LyricQuality.containsCJK(rawName),
-                  (s.artists ?? []).contains(where: { TextNormalizer.artistsMatch($0.name ?? "", artist) }) else { continue }
+                  (s.artists ?? []).contains(where: { $0.matches(artist) }) else { continue }
             let name = TextNormalizer.normalizeTitle(rawName)
             // 整名需与原题宽松匹配（确保是同一首歌）
             guard TextNormalizer.looselyEqual(name, track) else { continue }
@@ -388,7 +396,7 @@ enum NetEaseLyricsService {
         comps.setQuery([
             URLQueryItem(name: "s", value: "\(track) \(artist)"),
             URLQueryItem(name: "type", value: "1"),
-            URLQueryItem(name: "limit", value: "5")
+            URLQueryItem(name: "limit", value: "20")
         ])
         let (data, resp) = try await httpGet(comps, referer: "https://music.163.com", browserUA: true)
         guard (200..<300).contains(resp.statusCode) else { return nil }
@@ -397,13 +405,12 @@ enum NetEaseLyricsService {
 
         // 硬性要求标题宽松匹配（防止拿到同名异曲/翻唱的错误歌词）
         let titleMatched = songs.filter { s in
-            s.name.map { TextNormalizer.looselyEqual($0, track) && TextNormalizer.versionsCompatible($0, track) } ?? false
+            s.titleMatches(track) && TextNormalizer.versionsCompatible(s.name ?? "", track)
         }
         guard !titleMatched.isEmpty else { return nil }
         func artistMatch(_ s: SearchResponse.Result.Song) -> Bool {
             (s.artists ?? []).contains {
-                let n = ($0.name ?? "").lowercased()
-                return TextNormalizer.artistsMatch(n, artist)
+                return $0.matches(artist)
             }
         }
         // 已知艺人时必须匹配，避免自动选择同名翻唱。
@@ -455,13 +462,13 @@ enum NetEaseLyricsService {
         comps.setQuery([
             URLQueryItem(name: "s", value: "\(track) \(artist)"),
             URLQueryItem(name: "type", value: "1"),
-            URLQueryItem(name: "limit", value: "5")
+            URLQueryItem(name: "limit", value: "20")
         ])
         guard let (data, resp) = try? await httpGet(comps, referer: "https://music.163.com", browserUA: true),
               (200..<300).contains(resp.statusCode),
               let songs = try? JSONDecoder().decode(SearchResponse.self, from: data).result?.songs else { return [] }
         let titleMatched = songs.filter { s in
-            guard let name = s.name, TextNormalizer.looselyEqual(name, track), TextNormalizer.versionsCompatible(name, track) else { return false }
+            guard let name = s.name, s.titleMatches(track), TextNormalizer.versionsCompatible(name, track) else { return false }
             if duration > 0, let milliseconds = s.duration ?? s.dt, milliseconds > 0,
                abs(Double(milliseconds) / 1000 - duration) > 6 { return false }
             return true
@@ -469,8 +476,7 @@ enum NetEaseLyricsService {
         // 已知艺人时必须匹配。
         func artistMatch(_ s: SearchResponse.Result.Song) -> Bool {
             (s.artists ?? []).contains {
-                let n = ($0.name ?? "").lowercased()
-                return TextNormalizer.artistsMatch(n, artist)
+                return $0.matches(artist)
             }
         }
         let artistMatched = titleMatched.filter(artistMatch)

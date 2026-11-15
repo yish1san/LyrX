@@ -17,8 +17,8 @@ actor LyricsCache {
     }
 
     /// 当前缓存版本：匹配策略或数据结构修正后递增，旧条目自动失效重取
-    /// v7：重新解析旧歌词，恢复此前被丢弃的 LRC 停唱边界。
-    private static let currentVersion = 7
+    /// v8：重新匹配旧缓存，避免旧的名称匹配失败继续遮蔽跨地区解析。
+    private static let currentVersion = 8
 
     private let positiveTTL: TimeInterval = 30 * 24 * 3600
     private let negativeTTL: TimeInterval = 6 * 3600

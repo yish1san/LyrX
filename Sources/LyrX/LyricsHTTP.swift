@@ -3,7 +3,7 @@ import Foundation
 /// 歌词请求独立于持久 Cookie、凭据和 URL 缓存；禁止明文及跨主机重定向。
 enum LyricsHTTP {
     static let allowedHosts: Set<String> = [
-        "lrclib.net", "music.163.com", "raw.githubusercontent.com", "api.musixmatch.com"
+        "itunes.apple.com", "lrclib.net", "music.163.com", "raw.githubusercontent.com", "api.musixmatch.com"
     ]
 
     private final class RedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
